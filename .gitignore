@@ -169,3 +169,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# ---------------------------
+# Sensitive Files to Exclude
+# ---------------------------
+
+# Google API credentials and token files
+credentials.json
+token.pickle
