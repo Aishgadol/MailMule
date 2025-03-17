@@ -54,7 +54,7 @@ def save_user_credentials(user_id: str, creds: Credentials):
     record = {"user_id": user_id, "creds": creds_dict}
     with open(credentials_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
-    print(f"saved credentials for user {user_id}")
+    print(  f"saved credentials for user {user_id}")
 
 # helper function to load credentials for a given user id
 def load_user_credentials(user_id: str) -> Credentials:
@@ -65,10 +65,10 @@ def load_user_credentials(user_id: str) -> Credentials:
             try:
                 record = json.loads(line)
                 if record.get("user_id") == user_id:
-                    print(f"loaded credentials for user {user_id}")
+                    print(  f"loaded credentials for user {user_id}")
                     return Credentials.from_authorized_user_info(record["creds"], SCOPES)
             except Exception as err:
-                print("error parsing record:", err)
+                print("error parsing record: ", err)
     raise HTTPException(status_code=404, detail="user credentials not found")
 
 # helper function to remove credentials for a user
@@ -85,8 +85,8 @@ def remove_user_credentials(user_id: str):
                 if record.get("user_id") != user_id:
                     f.write(line)
             except Exception as err:
-                print("error processing line:", err)
-    print(f"removed credentials for user {user_id}")
+                print("error processing line: ", err)
+    print(  f"removed credentials for user {user_id}")
 
 # endpoint: /login - performs oauth flow and stores credentials with a unique id
 @app.get("/login")
@@ -98,10 +98,10 @@ async def login():
         print("oauth flow completed")
         user_id = str(uuid.uuid4())
         save_user_credentials(user_id, user_creds)
-        print("login successful, user id:", user_id)
+        print("login successful, user id: ", user_id)
         return {"status": "logged in successfully", "user_id": user_id}
     except Exception as e:
-        print("error during login:", str(e))
+        print("error during login: ", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 # endpoint: /fetch_emails - fetches gmail emails and creates a vector index
@@ -113,7 +113,7 @@ async def fetch_emails(user_id: str = Query(...)):
         service = build('gmail', 'v1', credentials=user_creds)
         results = service.users().messages().list(userId='me', maxResults=100).execute()
         messages = results.get('messages', [])
-        print(f"fetched {len(messages)} messages for user {user_id}")
+        print(  f"fetched {len(messages)} messages for user {user_id}")
         global email_data, embedding_matrix, faiss_index
         email_data = []
         texts = []
@@ -150,13 +150,13 @@ async def fetch_emails(user_id: str = Query(...)):
         print("generating embeddings for emails...")
         embedding_matrix = embedding_model.encode(texts, convert_to_numpy=True)
         dim = embedding_matrix.shape[1]
-        print(f"embedding dimension: {dim}")
+        print( f"embedding dimension: {dim}")
         faiss_index = faiss.IndexFlatL2(dim)
         faiss_index.add(embedding_matrix)
-        print(f"faiss index built with {faiss_index.ntotal} vectors")
+        print( f"faiss index built with {faiss_index.ntotal} vectors")
         return {"status": "emails fetched and indexed", "count": len(email_data)}
     except Exception as e:
-        print("error fetching emails:", str(e))
+        print("error fetching emails: ", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 # endpoint: /search - searches for emails based on query using the faiss index
@@ -166,20 +166,20 @@ async def search(search_query: SearchQuery, user_id: str = Query(...)):
         _ = load_user_credentials(user_id)  # verify user exists
         if faiss_index is None:
             raise HTTPException(status_code=400, detail="emails not indexed, fetch emails first")
-        print(f"searching for query '{search_query.query}' for user {user_id}")
+        print( f"searching for query '{search_query.query}' for user {user_id}")
         query_vec = embedding_model.encode([search_query.query], convert_to_numpy=True)
         k = 10  # number of neighbors
         distances, indices = faiss_index.search(query_vec, k)
-        print("search distances:", distances)
+        print("search distances: ", distances)
         results = []
         for idx in indices[0]:
             if idx < len(email_data):
                 results.append(email_data[idx])
         results.sort(key=lambda x: x['date'])
-        print("search results sorted")
+        print("search results sorted.")
         return {"results": results}
     except Exception as e:
-        print("error during search:", str(e))
+        print("error during search: ", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 # endpoint: /disconnect - removes user's credentials from the file
@@ -187,10 +187,10 @@ async def search(search_query: SearchQuery, user_id: str = Query(...)):
 async def disconnect(user_id: str = Query(...)):
     try:
         remove_user_credentials(user_id)
-        print(f"user {user_id} disconnected")
+        print(  f"user {user_id} disconnected")
         return {"status": "disconnected", "user_id": user_id}
     except Exception as e:
-        print("error during disconnect:", str(e))
+        print("error during disconnect: ", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 # main block to run the server directly from the ide
