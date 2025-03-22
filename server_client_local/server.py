@@ -18,7 +18,6 @@ from google.oauth2.credentials import Credentials  # for handling credentials
 
 # import semantic search libraries
 from sentence_transformers import SentenceTransformer  # for generating embeddings
-import faiss  # for vector search
 
 # create fastapi app
 app = FastAPI()
