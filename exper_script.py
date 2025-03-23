@@ -1,39 +1,42 @@
-import requests
+import json
+import os
 
-LM_STUDIO_API_URL = "http://localhost:1234/v1/chat/completions"
+input_file = 'emails.json'
+output_file_1 = 'emails1.json'
+output_file_2 = 'emails2.json'
 
-def query_tinyllama(messages, temperature=0.7):
-    payload = {
-        "model": "TinyLlama",
-        "messages": messages,
-        "temperature": temperature,
-        "stream": False
-    }
-    response = requests.post(LM_STUDIO_API_URL, json=payload)
-    response.raise_for_status()
-    return response.json()['choices'][0]['message']['content'].strip()
+# Load all emails
+with open(input_file, 'r') as f:
+    emails = json.load(f)
 
-def main():
-    print("Chatting locally with TinyLlama! Type 'exit' to quit.\n")
+# Estimate size of each email individually
+email_sizes = [len(json.dumps(email)) for email in emails]
+total_size = sum(email_sizes)
+half_size = total_size / 2
 
-    while True:
-        user_input = input("You: ")
-        if user_input.lower() in ['exit', 'quit']:
-            print("Exiting chat. Goodbye!")
-            break
+emails1 = []
+emails2 = []
+accumulated_size = 0
 
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": user_input}
-        ]
+# Smart split by size
+for email, size in zip(emails, email_sizes):
+    if accumulated_size + size <= half_size:
+        emails1.append(email)
+        accumulated_size += size
+    else:
+        emails2.append(email)
 
-        try:
-            print("TinyLlama is thinking...\n")
-            reply = query_tinyllama(messages)
-            print(f"TinyLlama: {reply}\n")
-        except requests.exceptions.RequestException as e:
-            print(f"Error connecting to LM Studio locally: {e}")
-            break
+# Save both files
+with open(output_file_1, 'w') as f1:
+    json.dump(emails1, f1, indent=4)
 
-if __name__ == "__main__":
-    main()
+with open(output_file_2, 'w') as f2:
+    json.dump(emails2, f2, indent=4)
+
+# Output stats
+def size_in_mb(path):
+    return os.path.getsize(path) / (1024 * 1024)
+
+print(f"Split {len(emails)} emails based on size.")
+print(f"{output_file_1}: {len(emails1)} emails, {size_in_mb(output_file_1):.2f} MB")
+print(f"{output_file_2}: {len(emails2)} emails, {size_in_mb(output_file_2):.2f} MB")

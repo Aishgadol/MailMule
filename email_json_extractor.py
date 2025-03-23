@@ -4,9 +4,11 @@ This script samples up to 2000 random emails from your Gmail account using the G
 It extracts only essential information needed for embedding:
   - Minimal metadata: id, subject, from, date
   - Combined content: plain text body and allowed attachments (txt, csv, json, pdf)
+    (Attachments larger than 10 MB are skipped.)
 The resulting minimal email objects are saved incrementally in a file named "emails.json".
 
 Each time the script is run, you will be prompted to log in.
+Emails already present in emails.json are skipped.
 
 Before running:
   1. Enable the Gmail API and create OAuth credentials at https://console.cloud.google.com/
@@ -60,10 +62,12 @@ def extract_attachment_texts(service, message_id, payload):
     """
     Recursively process the payload to find allowed attachments.
     For attachments with allowed extensions (txt, csv, json, pdf),
-    fetch and decode the attachment and return its text content.
+    if the attachment's size is less than or equal to 10 MB, fetch and decode
+    the attachment and return its text content.
     """
     texts = []
     allowed_extensions = ['.txt', '.csv', '.json', '.pdf']
+    max_size = 10 * 1024 * 1024  # 10 MB in bytes
 
     if 'parts' in payload:
         for part in payload['parts']:
@@ -73,6 +77,11 @@ def extract_attachment_texts(service, message_id, payload):
                 filename = part.get('filename', '')
                 if filename and any(filename.lower().endswith(ext) for ext in allowed_extensions):
                     body = part.get('body', {})
+                    # Check if the attachment size is reported and skip if it exceeds 10 MB.
+                    attachment_size = body.get('size', 0)
+                    if attachment_size > max_size:
+                        print(f"Skipping attachment {filename} in message {message_id} (size {attachment_size} bytes > 10MB).")
+                        continue
                     if 'attachmentId' in body:
                         attachment_id = body['attachmentId']
                         try:
@@ -149,11 +158,21 @@ def extract_essential_info(email, service):
     essential['content'] = "\n\n".join(content_parts).strip()
     return essential
 
+def save_progress(emails_list, output_file):
+    """Saves the current emails list to the specified JSON file."""
+    try:
+        with open(output_file, 'w') as f:
+            json.dump(emails_list, f, indent=4)
+        print(f"Saved progress: {len(emails_list)} emails.")
+    except Exception as e:
+        print(f"Error saving emails to file: {e}")
+
 def fetch_and_save_emails_single_file(service, message_ids, output_file="emails.json", sample_size=2000):
     """
     Randomly sample up to sample_size emails, extract minimal essential information,
     and update a single JSON file incrementally.
     Each email is processed individually; errors are logged and skipped.
+    Saves progress every 100 processed emails (and at the end).
     """
     total = len(message_ids)
     print(f"Found {total} emails in your account.")
@@ -200,13 +219,12 @@ def fetch_and_save_emails_single_file(service, message_ids, output_file="emails.
 
         emails_list.append(essential_info)
 
-        # Save progress after processing each email.
-        try:
-            with open(output_file, 'w') as f:
-                json.dump(emails_list, f, indent=4)
-            print(f"Saved progress after processing email ID {msg_id}.")
-        except Exception as e:
-            print(f"Error saving emails to file after processing email ID {msg_id}: {e}")
+        # Save progress every 100 processed emails.
+        if len(emails_list) % 100 == 0:
+            save_progress(emails_list, output_file)
+
+    # Final save after processing all emails.
+    save_progress(emails_list, output_file)
 
 def main():
     service = get_gmail_service()
