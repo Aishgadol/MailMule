@@ -7,13 +7,14 @@ It uses a two-step sampling approach:
      for all emails (both sent and received) involving those addresses.
 
 Additional filtering rules:
-  - If a sent email is a self-email (i.e. the recipient equals the sender's email address),
-    skip all conversation emails for that recipient.
-  - For all conversations (threads), if the thread has more than 1000 emails, skip it.
+  - If the recipient is the user's email address (normalized), skip all conversation emails for that recipient.
+  - For any conversation (thread) longer than 1000 emails, skip it.
 
-All emails are preprocessed to decode their text (handling base64, quoted-printable, and HTML cleaning)
-and to extract text-based attachments (for allowed types smaller than 10 MB). The final output is saved
-incrementally in "emails.json", and will contain at most 2000 emails.
+Each email is preprocessed to decode its text (handling base64, quoted‑printable, and HTML cleaning)
+and to extract text-based attachments (for allowed types smaller than 10 MB).
+A new field "conversation_id" is added (set to the Gmail thread ID) and a field "order" is added to indicate the
+chronological order within that conversation.
+The final output is saved incrementally in "emails.json" and will contain at most 2000 emails.
 
 Each run requires you to log in via OAuth (no token caching).
 
@@ -31,6 +32,8 @@ import base64
 import quopri
 import io
 import re
+from collections import defaultdict
+from email.utils import parsedate_to_datetime
 
 from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
@@ -42,7 +45,7 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 def extract_email_address(address_str):
     """
     Extracts and normalizes an email address from a header string.
-    For example, given '<some name> <some_name@gmail.com>' it returns 'some_name@gmail.com'.
+    E.g., given 'Idan <xanjera@gmail.com>' it returns 'xanjera@gmail.com'.
     """
     match = re.search(r'[\w\.-]+@[\w\.-]+', address_str)
     if match:
@@ -224,9 +227,16 @@ def extract_attachment_texts(service, message_id, payload):
     return texts
 
 def extract_essential_info(email, service):
+    """
+    Extract and return a minimal dictionary with essential information from an email.
+    Added fields:
+      - conversation_id: set to the Gmail threadId (if present)
+    """
     essential = {}
     msg_id = email.get('id', '')
     essential['id'] = msg_id
+    # Add conversation_id field from Gmail threadId.
+    essential['conversation_id'] = email.get('threadId', '')
 
     headers = {}
     for header in email.get('payload', {}).get('headers', []):
@@ -252,6 +262,26 @@ def extract_essential_info(email, service):
 
     essential['content'] = "\n\n".join(content_parts).strip()
     return essential
+
+# ----------------------- Conversation Order Assignment -----------------------
+def assign_conversation_order(emails_list):
+    """
+    Groups emails by 'conversation_id', sorts each group by the email's date (parsed to datetime),
+    and assigns an 'order' field indicating the chronological order within that conversation.
+    """
+    groups = defaultdict(list)
+    for email_obj in emails_list:
+        conv_id = email_obj.get('conversation_id', '')
+        groups[conv_id].append(email_obj)
+
+    for conv_id, group in groups.items():
+        # Try to parse the date; if fails, use a default value.
+        try:
+            group.sort(key=lambda x: parsedate_to_datetime(x.get('date', '')))
+        except Exception as e:
+            group.sort(key=lambda x: x.get('date', ''))
+        for idx, email_obj in enumerate(group, start=1):
+            email_obj['order'] = idx
 
 # ----------------------- Incremental Saving -----------------------
 def save_progress(emails_list, output_file):
@@ -286,7 +316,7 @@ def fetch_and_save_conversation_emails(service, output_file="emails.json", max_o
         except Exception as e:
             print(f"Error reading existing file {output_file}: {e}")
             emails_list = []
-    processed_ids = {email.get('id') for email in emails_list if email.get('id')}
+    processed_ids = {email_obj.get('id') for email_obj in emails_list if email_obj.get('id')}
 
     thread_size_cache = {}
 
@@ -326,7 +356,7 @@ def fetch_and_save_conversation_emails(service, output_file="emails.json", max_o
             if len(emails_list) >= max_output_emails:
                 break
             normalized_recipient = extract_email_address(recipient)
-            # Skip if the recipient is the user's email address.
+            # Skip if the recipient is exactly the user's email.
             if normalized_recipient == user_email:
                 print(f"Skipping conversation for recipient {recipient} as it matches the user's email.")
                 continue
@@ -370,6 +400,8 @@ def fetch_and_save_conversation_emails(service, output_file="emails.json", max_o
         if len(emails_list) % 100 < 5:
             save_progress(emails_list, output_file)
 
+    # Assign conversation order before final save.
+    assign_conversation_order(emails_list)
     save_progress(emails_list, output_file)
 
 def main():
