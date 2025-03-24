@@ -1,73 +1,186 @@
 #!/usr/bin/env python3
 """
-This script samples up to 2000 random emails from your Gmail account using the Gmail API.
-It extracts only essential information needed for embedding:
-  - Minimal metadata: id, subject, from, date
-  - Combined content: plain text body and allowed attachments (txt, csv, json, pdf)
-    (Attachments larger than 10 MB are skipped.)
-The resulting minimal email objects are saved incrementally in a file named "emails.json".
+This script builds a conversation-centric email dataset from your Gmail account.
+It uses a two-step sampling approach:
+  1. It retrieves emails from your sent mailbox (label "SENT") and processes each one.
+  2. For each sent email, it extracts recipient addresses from the "To" header and then searches
+     for all emails (both sent and received) involving those addresses.
 
-Each time the script is run, you will be prompted to log in.
-Emails already present in emails.json are skipped.
+Additional filtering rules:
+  - If a sent email is a self-email (i.e. the recipient equals the sender's email address),
+    skip all conversation emails for that recipient.
+  - For all conversations (threads), if the thread has more than 1000 emails, skip it.
+
+All emails are preprocessed to decode their text (handling base64, quoted-printable, and HTML cleaning)
+and to extract text-based attachments (for allowed types smaller than 10 MB). The final output is saved
+incrementally in "emails.json", and will contain at most 2000 emails.
+
+Each run requires you to log in via OAuth (no token caching).
 
 Before running:
   1. Enable the Gmail API and create OAuth credentials at https://console.cloud.google.com/
   2. Download your credentials as 'credentials.json' into the same folder as this script.
   3. Install required libraries:
-       pip install --upgrade google-api-python-client google-auth-httplib2 google-auth-oauthlib
+       pip install --upgrade google-api-python-client google-auth-httplib2 google-auth-oauthlib beautifulsoup4 python-docx PyPDF2
 """
 
 import os
 import json
 import random
 import base64
+import quopri
+import io
+import re
+
+from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
+# ----------------------- Helper to Normalize Email Addresses -----------------------
+def extract_email_address(address_str):
+    """
+    Extracts and normalizes an email address from a header string.
+    For example, given '<some name> <some_name@gmail.com>' it returns 'some_name@gmail.com'.
+    """
+    match = re.search(r'[\w\.-]+@[\w\.-]+', address_str)
+    if match:
+        return match.group(0).lower()
+    return address_str.lower()
+
+# ----------------------- Authentication & Query Helpers -----------------------
 def get_gmail_service():
-    """
-    Prompts the user to log in via OAuth2 every time the script runs and returns an authorized Gmail API service instance.
-    """
     flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
     creds = flow.run_local_server(port=0)
     return build('gmail', 'v1', credentials=creds)
 
-def list_all_message_ids(service):
-    """Retrieve all message IDs from the user's Gmail account."""
+def list_messages_by_label(service, label_id):
     message_ids = []
     user_id = 'me'
     try:
-        response = service.users().messages().list(userId=user_id).execute()
+        response = service.users().messages().list(userId=user_id, labelIds=[label_id]).execute()
     except Exception as e:
-        print("Error listing messages:", e)
+        print(f"Error listing messages for label {label_id}:", e)
         return message_ids
 
     if 'messages' in response:
         message_ids.extend(response['messages'])
-
     while 'nextPageToken' in response:
         try:
             page_token = response['nextPageToken']
-            response = service.users().messages().list(userId=user_id, pageToken=page_token).execute()
+            response = service.users().messages().list(userId=user_id, labelIds=[label_id], pageToken=page_token).execute()
             if 'messages' in response:
                 message_ids.extend(response['messages'])
         except Exception as e:
-            print("Error retrieving next page of messages:", e)
+            print("Error retrieving next page:", e)
             break
     return message_ids
 
+def search_messages_by_query(service, query):
+    message_ids = []
+    user_id = 'me'
+    try:
+        response = service.users().messages().list(userId=user_id, q=query).execute()
+    except Exception as e:
+        print(f"Error executing search query '{query}':", e)
+        return message_ids
+
+    if 'messages' in response:
+        message_ids.extend(response['messages'])
+    while 'nextPageToken' in response:
+        try:
+            page_token = response['nextPageToken']
+            response = service.users().messages().list(userId=user_id, q=query, pageToken=page_token).execute()
+            if 'messages' in response:
+                message_ids.extend(response['messages'])
+        except Exception as e:
+            print("Error retrieving next page for query:", e)
+            break
+    return message_ids
+
+# ----------------------- Decoding & Extraction Helpers -----------------------
+def get_header_value(headers, key):
+    for header in headers:
+        if header.get('name', '').lower() == key.lower():
+            return header.get('value', '')
+    return None
+
+def decode_part_data(data, encoding):
+    try:
+        decoded_bytes = base64.urlsafe_b64decode(data.encode('UTF-8'))
+    except Exception as e:
+        print("Base64 decoding error:", e)
+        return ""
+    if encoding and encoding.lower() == 'quoted-printable':
+        try:
+            decoded_bytes = quopri.decodestring(decoded_bytes)
+        except Exception as e:
+            print("Quoted-printable decoding error:", e)
+    try:
+        return decoded_bytes.decode('utf-8', errors='replace')
+    except Exception as e:
+        return decoded_bytes.decode('latin1', errors='replace')
+
+def extract_plain_text(payload):
+    text_parts = []
+    mime = payload.get('mimeType', '')
+    headers = payload.get('headers', [])
+    encoding = get_header_value(headers, "Content-Transfer-Encoding")
+    if mime in ['text/plain', 'text/html']:
+        data = payload.get('body', {}).get('data')
+        if data:
+            decoded_text = decode_part_data(data, encoding)
+            if mime == 'text/html':
+                soup = BeautifulSoup(decoded_text, "html.parser")
+                for tag in soup(["script", "style"]):
+                    tag.decompose()
+                cleaned_text = soup.get_text(separator="\n")
+                text_parts.append(cleaned_text)
+            else:
+                text_parts.append(decoded_text)
+    if 'parts' in payload:
+        for part in payload['parts']:
+            part_text = extract_plain_text(part)
+            if part_text:
+                text_parts.append(part_text)
+    return "\n".join(text_parts)
+
+def extract_docx_text(bytes_data):
+    try:
+        from docx import Document
+    except ImportError:
+        print("python-docx not installed; skipping DOCX extraction.")
+        return ""
+    try:
+        f = io.BytesIO(bytes_data)
+        document = Document(f)
+        return "\n".join(para.text for para in document.paragraphs)
+    except Exception as e:
+        print("Error extracting DOCX text:", e)
+        return ""
+
+def extract_pdf_text(bytes_data):
+    try:
+        import PyPDF2
+    except ImportError:
+        print("PyPDF2 not installed; skipping PDF extraction.")
+        return ""
+    try:
+        reader = PyPDF2.PdfReader(io.BytesIO(bytes_data))
+        text = []
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            text.append(page_text)
+        return "\n".join(text)
+    except Exception as e:
+        print("Error extracting PDF text:", e)
+        return ""
+
 def extract_attachment_texts(service, message_id, payload):
-    """
-    Recursively process the payload to find allowed attachments.
-    For attachments with allowed extensions (txt, csv, json, pdf),
-    if the attachment's size is less than or equal to 10 MB, fetch and decode
-    the attachment and return its text content.
-    """
     texts = []
-    allowed_extensions = ['.txt', '.csv', '.json', '.pdf']
-    max_size = 10 * 1024 * 1024  # 10 MB in bytes
+    allowed_extensions = ['.txt', '.csv', '.json', '.docx', '.pdf']
+    max_size = 10 * 1024 * 1024  # 10 MB
 
     if 'parts' in payload:
         for part in payload['parts']:
@@ -77,7 +190,6 @@ def extract_attachment_texts(service, message_id, payload):
                 filename = part.get('filename', '')
                 if filename and any(filename.lower().endswith(ext) for ext in allowed_extensions):
                     body = part.get('body', {})
-                    # Check if the attachment size is reported and skip if it exceeds 10 MB.
                     attachment_size = body.get('size', 0)
                     if attachment_size > max_size:
                         print(f"Skipping attachment {filename} in message {message_id} (size {attachment_size} bytes > 10MB).")
@@ -90,45 +202,32 @@ def extract_attachment_texts(service, message_id, payload):
                             ).execute()
                             data = attachment.get('data')
                             if data:
-                                decoded_data = base64.urlsafe_b64decode(data.encode('UTF-8'))
-                                text = decoded_data.decode('utf-8', errors='replace')
-                                texts.append(text)
+                                try:
+                                    raw_bytes = base64.urlsafe_b64decode(data.encode('UTF-8'))
+                                except Exception as e:
+                                    print(f"Error decoding attachment {filename} in message {message_id}: {e}")
+                                    continue
+                                ext = filename.lower().split('.')[-1]
+                                if ext in ['txt', 'csv', 'json']:
+                                    att_encoding = get_header_value(part.get('headers', []), "Content-Transfer-Encoding")
+                                    text = decode_part_data(data, att_encoding)
+                                elif ext == 'docx':
+                                    text = extract_docx_text(raw_bytes)
+                                elif ext == 'pdf':
+                                    text = extract_pdf_text(raw_bytes)
+                                else:
+                                    text = ""
+                                if text:
+                                    texts.append(text)
                         except Exception as e:
-                            print(f"Error decoding attachment {filename} in message {message_id}: {e}")
+                            print(f"Error processing attachment {filename} in message {message_id}: {e}")
     return texts
 
-def extract_plain_text(payload):
-    """
-    Recursively extract plain text content from the payload.
-    If a part has mimeType 'text/plain', decode and return its content.
-    """
-    text_parts = []
-    if payload.get('mimeType') == 'text/plain':
-        body = payload.get('body', {})
-        data = body.get('data')
-        if data:
-            try:
-                decoded_text = base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8', errors='replace')
-                text_parts.append(decoded_text)
-            except Exception as e:
-                print("Error decoding plain text:", e)
-    if 'parts' in payload:
-        for part in payload['parts']:
-            extracted = extract_plain_text(part)
-            if extracted:
-                text_parts.append(extracted)
-    return "\n".join(text_parts)
-
 def extract_essential_info(email, service):
-    """
-    Extract and return a minimal dictionary with essential information from an email.
-    This includes: id, subject, from, date, and content (plain text body + allowed attachments).
-    """
     essential = {}
     msg_id = email.get('id', '')
     essential['id'] = msg_id
 
-    # Extract headers into a dict for easy lookup.
     headers = {}
     for header in email.get('payload', {}).get('headers', []):
         name = header.get('name', '').lower()
@@ -139,14 +238,10 @@ def extract_essential_info(email, service):
     essential['from'] = headers.get('from', '')
     essential['date'] = headers.get('date', '')
 
-    # Extract plain text content from the email body.
     payload = email.get('payload', {})
     plain_text = extract_plain_text(payload)
-
-    # Extract allowed attachment texts.
     attachments_text = extract_attachment_texts(service, msg_id, payload)
 
-    # Combine plain text, attachments text, and fallback snippet if necessary.
     content_parts = []
     if plain_text:
         content_parts.append(plain_text)
@@ -158,78 +253,128 @@ def extract_essential_info(email, service):
     essential['content'] = "\n\n".join(content_parts).strip()
     return essential
 
+# ----------------------- Incremental Saving -----------------------
 def save_progress(emails_list, output_file):
-    """Saves the current emails list to the specified JSON file."""
     try:
-        with open(output_file, 'w') as f:
-            json.dump(emails_list, f, indent=4)
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(emails_list, f, ensure_ascii=False, indent=4)
         print(f"Saved progress: {len(emails_list)} emails.")
     except Exception as e:
         print(f"Error saving emails to file: {e}")
 
-def fetch_and_save_emails_single_file(service, message_ids, output_file="emails.json", sample_size=2000):
+# ----------------------- New Conversation Sampling -----------------------
+def fetch_and_save_conversation_emails(service, output_file="emails.json", max_output_emails=701):
     """
-    Randomly sample up to sample_size emails, extract minimal essential information,
-    and update a single JSON file incrementally.
-    Each email is processed individually; errors are logged and skipped.
-    Saves progress every 100 processed emails (and at the end).
-    """
-    total = len(message_ids)
-    print(f"Found {total} emails in your account.")
-    num_to_sample = min(sample_size, total)
-    print(f"Sampling {num_to_sample} emails...")
+    For each email in the sent box, process and save the email.
+    Then, extract recipient addresses from that email and search for all emails
+    (both sent and received) involving those addresses.
 
-    # Load previously saved emails if available.
+    Additional filtering:
+      - If the recipient is the user's email address, skip all conversation emails for that recipient.
+      - For any conversation (thread) longer than 1000 emails, skip it.
+
+    The final output JSON will contain at most max_output_emails emails.
+    Incremental saving is done every 100 new emails.
+    """
+    user_id = 'me'
+    emails_list = []
+
     if os.path.exists(output_file):
         try:
-            with open(output_file, 'r') as f:
+            with open(output_file, 'r', encoding='utf-8') as f:
                 emails_list = json.load(f)
         except Exception as e:
             print(f"Error reading existing file {output_file}: {e}")
             emails_list = []
-    else:
-        emails_list = []
-
-    # Create a set of already processed email IDs.
     processed_ids = {email.get('id') for email in emails_list if email.get('id')}
 
-    # Filter out already processed emails.
-    unprocessed_messages = [msg for msg in message_ids if msg['id'] not in processed_ids]
-    if len(unprocessed_messages) < num_to_sample:
-        num_to_sample = len(unprocessed_messages)
-        print(f"Adjusting sample size to {num_to_sample} due to already processed emails.")
+    thread_size_cache = {}
 
-    sampled_messages = random.sample(unprocessed_messages, num_to_sample)
+    sent_messages = list_messages_by_label(service, "SENT")
+    print(f"Found {len(sent_messages)} sent emails as seeds...")
 
-    for idx, msg in enumerate(sampled_messages, start=1):
-        msg_id = msg['id']
+    for idx, msg in enumerate(sent_messages, start=1):
+        if len(emails_list) >= max_output_emails:
+            print("Reached maximum output emails limit.")
+            break
+        sent_id = msg['id']
         try:
-            email = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+            sent_email = service.users().messages().get(userId=user_id, id=sent_id, format='full').execute()
         except Exception as e:
-            print(f"Skipping email ID {msg_id} due to error fetching email: {e}")
+            print(f"Skipping sent email ID {sent_id} due to error: {e}")
             continue
+        # Extract user's email address (normalized).
+        user_email_raw = get_header_value(sent_email.get('payload', {}).get('headers', []), "From") or ""
+        user_email = extract_email_address(user_email_raw)
 
-        print(f"Processing {idx}/{num_to_sample} - email ID {msg_id}")
+        if sent_id not in processed_ids:
+            try:
+                essential = extract_essential_info(sent_email, service)
+                emails_list.append(essential)
+                processed_ids.add(sent_id)
+                print(f"Saved sent email ID {sent_id}.")
+            except Exception as e:
+                print(f"Error processing sent email ID {sent_id}: {e}")
+                continue
 
-        try:
-            essential_info = extract_essential_info(email, service)
-        except Exception as e:
-            print(f"Error extracting essential info for email ID {msg_id}: {e}")
+        to_field = get_header_value(sent_email.get('payload', {}).get('headers', []), "To")
+        if not to_field:
             continue
+        recipients = [addr.strip() for addr in re.split(r'[;,]', to_field) if addr.strip()]
 
-        emails_list.append(essential_info)
+        for recipient in recipients:
+            if len(emails_list) >= max_output_emails:
+                break
+            normalized_recipient = extract_email_address(recipient)
+            # Skip if the recipient is the user's email address.
+            if normalized_recipient == user_email:
+                print(f"Skipping conversation for recipient {recipient} as it matches the user's email.")
+                continue
+            query = f'from:"{recipient}" OR to:"{recipient}"'
+            conversation_msgs = search_messages_by_query(service, query)
+            print(f"Found {len(conversation_msgs)} messages for recipient {recipient}.")
+            for conv_msg in conversation_msgs:
+                if len(emails_list) >= max_output_emails:
+                    break
+                conv_id = conv_msg['id']
+                if conv_id in processed_ids:
+                    continue
 
-        # Save progress every 100 processed emails.
-        if len(emails_list) % 100 == 0:
+                thread_id = conv_msg.get('threadId')
+                if thread_id:
+                    if thread_id not in thread_size_cache:
+                        try:
+                            thread = service.users().threads().get(userId=user_id, id=thread_id, format='minimal').execute()
+                            thread_count = len(thread.get('messages', []))
+                            thread_size_cache[thread_id] = thread_count
+                        except Exception as e:
+                            print(f"Error getting thread {thread_id}: {e}")
+                            continue
+                    else:
+                        thread_count = thread_size_cache[thread_id]
+
+                    if thread_count > 1000:
+                        print(f"Skipping conversation thread {thread_id} because it has {thread_count} emails (> 1000).")
+                        continue
+
+                try:
+                    conv_email = service.users().messages().get(userId=user_id, id=conv_id, format='full').execute()
+                    essential_conv = extract_essential_info(conv_email, service)
+                    emails_list.append(essential_conv)
+                    processed_ids.add(conv_id)
+                    print(f"Saved conversation email ID {conv_id} for recipient {recipient}.")
+                except Exception as e:
+                    print(f"Error processing conversation email ID {conv_id}: {e}")
+                    continue
+
+        if len(emails_list) % 100 < 5:
             save_progress(emails_list, output_file)
 
-    # Final save after processing all emails.
     save_progress(emails_list, output_file)
 
 def main():
     service = get_gmail_service()
-    all_messages = list_all_message_ids(service)
-    fetch_and_save_emails_single_file(service, all_messages)
+    fetch_and_save_conversation_emails(service)
 
 if __name__ == '__main__':
     main()
