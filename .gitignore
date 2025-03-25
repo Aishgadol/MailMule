@@ -177,4 +177,4 @@ cython_debug/
 # Google API credentials and token files
 credentials.json
 token.pickle
-emails.json
+emails_old_with_repetitions.json

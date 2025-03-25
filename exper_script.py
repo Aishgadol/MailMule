@@ -1,7 +1,7 @@
 import json
 import os
 
-input_file = 'emails.json'
+input_file = 'emails_old_with_repetitions.json'
 output_file_1 = 'emails1.json'
 output_file_2 = 'emails2.json'
 
