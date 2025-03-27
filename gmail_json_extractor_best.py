@@ -400,6 +400,7 @@ def main():
                     print("error during incremental save")
         print("completed sampling from inbox")
 
+
     # group emails into conversations and perform final save
     print("grouping emails into conversations and final save")
     conversations = {}

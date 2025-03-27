@@ -1,12 +1,17 @@
 import sys
 import os
 import pickle
+import email.utils  # For parsing email date strings
+import openai     # OpenAI API for natural language processing
 
 from PyQt5 import QtWidgets, QtGui, QtCore
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+
+# Set your OpenAI API key (alternatively, set the OPENAI_API_KEY environment variable)
+openai.api_key = os.getenv("OPENAI_API_KEY", "your_openai_api_key_here")
 
 # Define the scope for read-only access to Gmail
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
@@ -49,7 +54,7 @@ class GmailApp(QtWidgets.QMainWindow):
 
         layout.addLayout(topButtonLayout)
 
-        # Chat area: a prompt input field and a submit button (hidden until login)
+        # Chat area: prompt input field and submit button (hidden until login)
         chatLayout = QtWidgets.QHBoxLayout()
         self.promptInput = QtWidgets.QLineEdit()
         self.promptInput.setPlaceholderText("Enter your query related to your emails...")
@@ -81,7 +86,7 @@ class GmailApp(QtWidgets.QMainWindow):
                 if self.creds and self.creds.expired and self.creds.refresh_token:
                     self.creds.refresh(Request())
                 else:
-                    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                    flow = InstalledAppFlow.from_client_secrets_file('../credentials.json', SCOPES)
                     self.creds = flow.run_local_server(port=0)
                 # Save credentials for future use
                 with open('token.pickle', 'wb') as token:
@@ -98,67 +103,86 @@ class GmailApp(QtWidgets.QMainWindow):
     def process_prompt(self):
         """
         Processes the user's natural language prompt.
-        The prompt is passed through a chain of models:
-          - The first module (parse_prompt) interprets the natural language prompt
-            and extracts search criteria.
-          - The second module (search_emails) uses the criteria to fetch matching emails.
+        The prompt is passed to the OpenAI API to extract search criteria.
         """
         prompt_text = self.promptInput.text().strip()
         if not prompt_text:
             return
-        # Process the prompt with a placeholder chain of models
+        # Call OpenAI API to interpret the prompt
         criteria = self.parse_prompt(prompt_text)
-        query = criteria.get("query", "")
+        query = criteria.get("query", prompt_text)  # Fallback to the raw prompt
         self.search_emails(query)
 
     def parse_prompt(self, prompt):
         """
-        Placeholder function for a chain of models.
-        In a real-world scenario, you might integrate a language model (like GPT-4)
-        to extract structured search parameters from the natural language prompt.
-        For simplicity, this function simply returns the prompt as the query.
+        Calls the OpenAI GPT model to extract structured search criteria from the natural language prompt.
+        For example, it could return a JSON-like structure with keywords and optional filters.
         """
-        return {"query": prompt}
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are an assistant that extracts search keywords from a natural language prompt about emails. Return a JSON with a key 'query' that contains the keywords for searching Gmail."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=50
+            )
+            # The model's response should be in JSON format. Here, we try to parse it.
+            result_text = response.choices[0].message.content.strip()
+            # For simplicity, we assume the response is something like: {"query": "dark chocolates"}
+            import json
+            criteria = json.loads(result_text)
+            return criteria
+        except Exception as e:
+            # In case of error, fallback to using the raw prompt as the query
+            return {"query": prompt}
 
     def search_emails(self, query):
         """
         Uses the Gmail API to search for emails matching the query.
         The results are then displayed in the tree view.
+        Emails are sorted such that the newest mail appears at the bottom.
         """
         try:
             service = build('gmail', 'v1', credentials=self.creds)
+            # The 'q' parameter supports Gmail search queries.
             results = service.users().messages().list(userId='me', q=query, maxResults=10).execute()
             messages = results.get('messages', [])
+            # Reverse the list to have the newest email at the bottom.
+            messages = list(reversed(messages))
             self.emailTree.clear()
             if not messages:
                 QtWidgets.QMessageBox.information(self, "No Results", "No emails matched your query.")
             else:
                 for msg in messages:
-                    # Retrieve full message details for each email
                     msg_data = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
                     snippet = msg_data.get('snippet', '')
                     headers = msg_data['payload'].get('headers', [])
                     subject = "N/A"
                     sender = "N/A"
-                    date = "N/A"
+                    date_str = "N/A"
+                    time_str = "N/A"
                     for header in headers:
                         if header['name'].lower() == 'subject':
                             subject = header['value']
                         elif header['name'].lower() == 'from':
                             sender = header['value']
                         elif header['name'].lower() == 'date':
-                            date = header['value']
-                    # For simplicity, the date string is used directly; you could parse it into date and time.
-                    date_str = date
-                    time_str = ""
-
+                            # Parse the date header into date and time
+                            try:
+                                parsed_date = email.utils.parsedate_to_datetime(header['value'])
+                                date_str = parsed_date.strftime("%Y-%m-%d")
+                                time_str = parsed_date.strftime("%H:%M:%S")
+                            except Exception:
+                                date_str = header['value']
                     # Create a top-level tree item with summary info
                     item = QtWidgets.QTreeWidgetItem([subject, sender, date_str, time_str])
                     # Add a child item that holds the full snippet (or full content if available)
                     child = QtWidgets.QTreeWidgetItem(["", "", "", snippet])
                     item.addChild(child)
                     self.emailTree.addTopLevelItem(item)
-                # Expand all tree items so the details are immediately visible upon expansion
+                # Expand all tree items so details are visible upon expansion
                 self.emailTree.expandAll()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error fetching emails", str(e))
