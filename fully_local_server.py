@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Fully local offline pipeline for email embedding, storage, and query retrieval.
-
-Components:
-  - Embedding Generation: Uses two SentenceTransformer models (distiluse-base-multilingual-cased-v2 and sentence-transformers-alephbert)
-    and concatenates their outputs.
-  - FAISS: Builds an index to store high-dimensional concatenated embeddings.
-  - PostgreSQL: Stores full email JSON records with metadata, linked via a unique vector_id.
-  - Query Processing: Converts a user query to an embedding, performs similarity search in FAISS, and fetches the corresponding emails.
+offline email search pipeline.
+embedding: concat distiluse and alephbert vectors.
+faiss: in-memory index for fast search.
+postgres: stores email metadata.
+query: compute query embedding, then fetch similar emails.
 """
 
 import json
@@ -17,238 +14,187 @@ import psycopg2
 from psycopg2.extras import Json
 from sentence_transformers import SentenceTransformer
 
-# --------------------------
-# Configuration Parameters
-# --------------------------
+# config - update these uppercase fields with your info
+pg_host = "localhost"  # postgres container host (port mapped)
+pg_port = 5432  # postgres port (default 5432)
+pg_user = "POSTGRES_USER"  # update with your postgres username
+pg_password = "POSTGRES_PASSWORD"  # update with your postgres password
+pg_database = "POSTGRES_DATABASE"  # update with your postgres db name
 
-# PostgreSQL connection parameters for a containerized instance.
-# Update the uppercase fields with your specific credentials.
-PG_HOST = "localhost"
-PG_PORT = 5432
-PG_USER = "POSTGRES_USER"  # <-- update with your PostgreSQL username
-PG_PASSWORD = "POSTGRES_PASSWORD"  # <-- update with your PostgreSQL password
-PG_DATABASE = "POSTGRES_DATABASE"  # <-- update with your PostgreSQL database name
+preprocessed_file = "preprocessed_emails.json"  # file output from preprocessing
+faiss_index_file = "faiss_index.bin"  # file to save/load faiss index
+embed_dim = 512 + 768  # total dims for concat embeddings (1280)
 
-# Filenames for preprocessed emails and FAISS index
-PREPROCESSED_FILE = "preprocessed_emails.json"
-FAISS_INDEX_FILE = "faiss_index.bin"
-
-# Embedding dimensions (assumed: 512 for distiluse + 768 for alephbert)
-EMBEDDING_DIMENSION = 512 + 768  # 1280
-
-
-# --------------------------
-# Utility and Helper Functions
-# --------------------------
 
 def load_emails():
-    """Load and flatten emails from the preprocessed conversations JSON."""
-    with open(PREPROCESSED_FILE, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    emails = []
-    for conv in data:
+    # load emails from json and flatten conversations into one list
+    with open(preprocessed_file, 'r', encoding='utf-8') as f:
+        conv_data = json.load(f)
+    all_emails = []
+    for conv in conv_data:
         if 'emails' in conv:
-            emails.extend(conv['emails'])
-    return emails
+            all_emails.extend(conv['emails'])
+    return all_emails
 
 
-def compute_embedding(text, model1, model2):
-    """
-    Compute embeddings for the given text using two models,
-    and return their concatenation as a single numpy vector.
-    """
-    emb1 = model1.encode(text, convert_to_numpy=True)
-    emb2 = model2.encode(text, convert_to_numpy=True)
-    return np.concatenate([emb1, emb2])
+def compute_embedding(text, model_a, model_b):
+    # get embedding from model_a and model_b and concat them into one vector
+    emb_a = model_a.encode(text, convert_to_numpy=True)
+    emb_b = model_b.encode(text, convert_to_numpy=True)
+    return np.concatenate([emb_a, emb_b])
 
 
-def build_faiss_index(emails, model1, model2):
-    """
-    For each email, compute the concatenated embedding from subject and content,
-    assign a unique integer id (vector_id), and add it to a FAISS index.
-    """
-    # Create a flat (L2) index and wrap it with an ID map to store custom ids.
-    index = faiss.IndexFlatL2(EMBEDDING_DIMENSION)
+def build_faiss_index(emails, model_a, model_b):
+    # create a faiss index using l2 distance, wrapped in an id map so we can assign custom ids
+    index = faiss.IndexFlatL2(embed_dim)
     index = faiss.IndexIDMap(index)
-
-    email_vectors = []
-    vector_ids = []
+    emb_list = []  # list to hold embedding vectors
+    id_list = []  # list to hold vector ids corresponding to emails
+    # loop over emails, compute embedding from subject and content, assign vector_id
     for i, email in enumerate(emails):
-        # Use both subject and content as the embedding input text
         text_parts = []
         if 'subject' in email:
             text_parts.append(email['subject'])
         if 'content' in email:
             text_parts.append(email['content'])
-        text = " ".join(text_parts)
-
-        # Compute the embedding and store it
-        emb = compute_embedding(text, model1, model2)
-        email_vectors.append(emb)
-        vector_ids.append(i)
-        # Store the vector id in the email record for linking with PostgreSQL
-        email['vector_id'] = i
-
-    if email_vectors:
-        vectors = np.vstack(email_vectors).astype('float32')
-        index.add_with_ids(vectors, np.array(vector_ids))
+        combined_text = " ".join(text_parts)  # combine subject and content
+        emb = compute_embedding(combined_text, model_a, model_b)
+        emb_list.append(emb)
+        id_list.append(i)
+        email['vector_id'] = i  # add vector id to email record for later lookup in postgres
+    if emb_list:
+        emb_array = np.vstack(emb_list).astype('float32')  # stack into a numpy array
+        index.add_with_ids(emb_array, np.array(id_list))
     return index
 
 
-def save_faiss_index(index, filename):
-    """Save the FAISS index to disk."""
-    faiss.write_index(index, filename)
+def save_index(index, file_path):
+    # save the faiss index to disk so we can reload it later without rebuilding
+    faiss.write_index(index, file_path)
 
 
-def load_faiss_index(filename):
-    """Load the FAISS index from disk."""
-    index = faiss.read_index(filename)
-    return index
-
-
-def connect_postgres():
-    """Connect to PostgreSQL and return the connection object."""
-    conn = psycopg2.connect(
-        host=PG_HOST,
-        port=PG_PORT,
-        user=PG_USER,
-        password=PG_PASSWORD,
-        dbname=PG_DATABASE
+def connect_pg():
+    # establish a connection to the postgres database
+    return psycopg2.connect(
+        host=pg_host,
+        port=pg_port,
+        user=pg_user,
+        password=pg_password,
+        dbname=pg_database
     )
-    return conn
 
 
-def create_table(conn):
-    """
-    Create the emails table (if it does not exist) with a schema that includes:
-      - vector_id: unique id linking to FAISS,
-      - various email metadata fields,
-      - raw_json: the full email record.
-    """
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS emails (
-        vector_id BIGINT PRIMARY KEY,
-        email_id TEXT,
-        subject TEXT,
-        sender TEXT,
-        date TEXT,
-        conversation_id TEXT,
-        content TEXT,
-        order_val TEXT,
-        raw_json JSONB
+def create_pg_table(conn):
+    # create a table to store email metadata and the full json record, if it doesn't exist
+    create_sql = """
+    create table if not exists emails (
+        vector_id bigint primary key,
+        email_id text,
+        subject text,
+        sender text,
+        date text,
+        conversation_id text,
+        content text,
+        order_val text,
+        raw_json jsonb
     );
     """
     cur = conn.cursor()
-    cur.execute(create_table_query)
+    cur.execute(create_sql)
     conn.commit()
     cur.close()
 
 
-def store_emails_in_postgres(emails, conn):
-    """
-    Insert each email record along with its metadata into PostgreSQL.
-    The 'vector_id' field is used as the primary key for linking with FAISS.
-    """
+def store_emails_pg(emails, conn):
+    # store each email record in postgres using vector_id as the unique key
     cur = conn.cursor()
-    insert_query = """
-    INSERT INTO emails (vector_id, email_id, subject, sender, date, conversation_id, content, order_val, raw_json)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (vector_id) DO UPDATE SET
-        email_id = EXCLUDED.email_id,
-        subject = EXCLUDED.subject,
-        sender = EXCLUDED.sender,
-        date = EXCLUDED.date,
-        conversation_id = EXCLUDED.conversation_id,
-        content = EXCLUDED.content,
-        order_val = EXCLUDED.order_val,
-        raw_json = EXCLUDED.raw_json;
+    insert_sql = """
+    insert into emails (vector_id, email_id, subject, sender, date, conversation_id, content, order_val, raw_json)
+    values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    on conflict (vector_id) do update set
+        email_id = excluded.email_id,
+        subject = excluded.subject,
+        sender = excluded.sender,
+        date = excluded.date,
+        conversation_id = excluded.conversation_id,
+        content = excluded.content,
+        order_val = excluded.order_val,
+        raw_json = excluded.raw_json;
     """
+    # loop over each email and insert its data
     for email in emails:
-        vector_id = email.get('vector_id')
-        email_id = email.get('id', '')
-        subject = email.get('subject', '')
-        sender = email.get('from', '')
-        date = email.get('date', '')
-        conversation_id = email.get('conversation_id', '')
-        content = email.get('content', '')
+        vec_id = email.get('vector_id')
+        email_id_val = email.get('id', '')
+        subject_val = email.get('subject', '')
+        sender_val = email.get('from', '')
+        date_val = email.get('date', '')
+        conv_id_val = email.get('conversation_id', '')
+        content_val = email.get('content', '')
         order_val = email.get('order', '')
         raw_json = json.dumps(email)
-        cur.execute(insert_query,
-                    (vector_id, email_id, subject, sender, date, conversation_id, content, order_val, raw_json))
+        cur.execute(insert_sql, (
+        vec_id, email_id_val, subject_val, sender_val, date_val, conv_id_val, content_val, order_val, raw_json))
     conn.commit()
     cur.close()
 
 
-def query_emails(query, index, model1, model2, conn, top_k=5):
-    """
-    Given a natural language query, compute its embedding,
-    perform a similarity search in the FAISS index,
-    then retrieve and return the matching email records from PostgreSQL.
-    """
-    # Compute the concatenated embedding for the query
-    emb = compute_embedding(query, model1, model2).astype('float32')
-    emb = np.expand_dims(emb, axis=0)  # shape (1, dimension)
-    distances, ids = index.search(emb, top_k)
-    # Retrieve the email records from PostgreSQL using the found vector_ids
-    vector_ids = ids[0].tolist()
+def query_emails(query_str, index, model_a, model_b, conn, top_k=5):
+    # compute the embedding for the query string and search the faiss index
+    q_emb = compute_embedding(query_str, model_a, model_b).astype('float32')
+    q_emb = np.expand_dims(q_emb, axis=0)  # reshape to (1, embed_dim)
+    dists, ids = index.search(q_emb, top_k)  # get distances and vector ids of top matches
+    id_list = ids[0].tolist()
+    # fetch the corresponding email records from postgres using the vector ids
     cur = conn.cursor()
-    select_query = "SELECT raw_json FROM emails WHERE vector_id = ANY(%s);"
-    cur.execute(select_query, (vector_ids,))
+    cur.execute("select raw_json from emails where vector_id = any(%s);", (id_list,))
     rows = cur.fetchall()
-    results = [row[0] for row in rows]
     cur.close()
-    return results, distances[0].tolist()
+    return [row[0] for row in rows], dists[0].tolist()
 
-
-# --------------------------
-# Main Pipeline Execution
-# --------------------------
 
 def main():
-    # Step 1: Load preprocessed emails.
-    print("Loading preprocessed emails...")
+    # main pipeline: load emails, build index, store in postgres, then query loop
+    print("loading emails...")
     emails = load_emails()
-    print(f"Loaded {len(emails)} emails.")
+    print("loaded", len(emails), "emails")
 
-    # Step 2: Load local embedding models.
-    print("Loading embedding models...")
-    model1 = SentenceTransformer("distiluse-base-multilingual-cased-v2")
-    model2 = SentenceTransformer("sentence-transformers-alephbert")
-    print("Embedding models loaded.")
+    print("loading embedding models...")
+    # load both models; they must be cached locally to avoid external calls
+    model_a = SentenceTransformer("distiluse-base-multilingual-cased-v2")
+    model_b = SentenceTransformer("sentence-transformers-alephbert")
+    print("models loaded")
 
-    # Step 3: Build FAISS index with concatenated embeddings.
-    print("Building FAISS index...")
-    index = build_faiss_index(emails, model1, model2)
-    print("FAISS index built.")
+    print("building faiss index...")
+    faiss_index = build_faiss_index(emails, model_a, model_b)
+    print("index built with", faiss_index.ntotal, "vectors")
 
-    # Step 4: Save the FAISS index to disk (optional but recommended).
-    print("Saving FAISS index to disk...")
-    save_faiss_index(index, FAISS_INDEX_FILE)
-    print("FAISS index saved as", FAISS_INDEX_FILE)
+    print("saving index to disk...")
+    save_index(faiss_index, faiss_index_file)
+    print("index saved as", faiss_index_file)
 
-    # Step 5: Connect to PostgreSQL, create the table, and store email metadata.
-    print("Connecting to PostgreSQL...")
-    conn = connect_postgres()
-    create_table(conn)
-    print("Storing emails in PostgreSQL...")
-    store_emails_in_postgres(emails, conn)
-    print("Emails stored in PostgreSQL.")
+    print("connecting to postgres...")
+    pg_conn = connect_pg()
+    create_pg_table(pg_conn)  # ensure table exists before inserting records
+    print("storing emails in postgres...")
+    store_emails_pg(emails, pg_conn)
+    print("emails stored in postgres")
 
-    # Step 6: Query processing loop.
-    print("Entering query loop. Type 'exit' to quit.")
+    # start a simple query loop to test the pipeline
+    print("entering query loop (type 'exit' to quit):")
     while True:
-        user_query = input("Enter your query: ")
-        if user_query.lower() == 'exit':
+        user_input = input("query> ")
+        if user_input.strip().lower() == "exit":
             break
-        results, distances = query_emails(user_query, index, model1, model2, conn, top_k=5)
-        print("Top matching emails:")
+        # get matching emails and distances
+        results, distances = query_emails(user_input, faiss_index, model_a, model_b, pg_conn, top_k=5)
+        print("top matches:")
         for res, dist in zip(results, distances):
-            print(f"Distance: {dist}")
+            print("distance:", dist)
             print(json.dumps(res, indent=2))
             print("-" * 40)
 
-    conn.close()
-    print("Query loop exited. Pipeline complete.")
+    pg_conn.close()  # close postgres connection
+    print("done.")
 
 
 if __name__ == '__main__':
