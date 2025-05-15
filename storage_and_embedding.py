@@ -1,37 +1,46 @@
 #!/usr/bin/env python3
 # store_and_embed.py
-# read preprocessed_emails.json, embed with bge-m3 (onnx), and upsert into postgres+pgvector
+# batch-embed emails and conversations, store vectors in pgvector
 
 import os
 import sys
 import json
+import time
 import logging
 from pathlib import Path
 from email.utils import parsedate_to_datetime
+from typing import List, Dict, Tuple
 
 import psycopg2
 from psycopg2.extras import Json, execute_values
 from sentence_transformers import SentenceTransformer
 
-# configure basic logging
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
-# ─── config from env vars or defaults ─────────────────────────────────────────
-DB_CONFIG = {
-    "host":     os.getenv("PGHOST", "localhost"),
-    "port":     os.getenv("PGPORT", "5432"),
-    "user":     os.getenv("PGUSER", "mailmule"),
-    "password": os.getenv("PGPASSWORD", "159753"),
-    "dbname":   os.getenv("PGDATABASE", "mailmule_db"),
-}
-INPUT_PATH = Path(
-    sys.argv[1] if len(sys.argv) > 1 else
-    "server_client_local_files/preprocessed_emails.json"
+# --- logging setup ----------------------------------------------------------
+log_level = logging.DEBUG if os.getenv("MAILMULE_DEBUG") else logging.INFO
+logging.basicConfig(
+    level=log_level,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%H:%M:%S",
 )
-EMBED_MODEL_NAME = "BAAI/bge-m3"
+log = logging.getLogger("mailmule")
 
-# ─── create table with pgvector column ────────────────────────────────────────
-DDL_SQL = """
+# --- constant config --------------------------------------------------------
+batch_size: int = 64
+model_name: str = "BAAI/bge-m3"
+json_path: Path = Path("server_client_local_files/preprocessed_emails.json")
+
+email_db_cfg = dict(
+    host=os.getenv("PGHOST", "localhost"),
+    port=os.getenv("PGPORT", "5432"),
+    user=os.getenv("PGUSER", "mailmule"),
+    password=os.getenv("PGPASSWORD", "159753"),
+    dbname=os.getenv("PGDATABASE", "mailmule_db"),
+)
+
+conversation_db_cfg = dict(email_db_cfg, dbname=os.getenv("PGCONV_DB", "mailmule_conv_db"))
+
+# --- ddl strings ------------------------------------------------------------
+email_ddl = """
 create extension if not exists vector;
 create table if not exists emails (
     id              text primary key,
@@ -45,7 +54,17 @@ create table if not exists emails (
     embedding       vector({dim})
 );
 """
-UPSERT_SQL = """
+
+conversation_ddl = """
+create extension if not exists vector;
+create table if not exists conversations (
+    conversation_id text primary key,
+    email_count     int,
+    embedding       vector({dim})
+);
+"""
+
+email_upsert_sql = """
 insert into emails
 (id, conversation_id, subject, sender, date,
  order_in_conv, content, raw, embedding)
@@ -53,132 +72,207 @@ values %s
 on conflict (id) do nothing;
 """
 
-def open_db_connection():
-    # connect to postgres using psycopg2
-    return psycopg2.connect(**DB_CONFIG)
+conversation_upsert_sql = """
+insert into conversations
+(conversation_id, email_count, embedding)
+values %s
+on conflict (conversation_id) do update
+set email_count = excluded.email_count,
+    embedding    = excluded.embedding;
+"""
 
-def ensure_table_schema(conn, dim):
-    # create extension and table if needed
+# --- helpers ----------------------------------------------------------------
+def open_db(cfg: dict) -> psycopg2.extensions.connection:
+    # open postgres connection
+    return psycopg2.connect(**cfg)
+
+def ensure_schema(conn, ddl: str, dim: int) -> None:
+    # create extension and tables
     with conn, conn.cursor() as cur:
-        cur.execute(DDL_SQL.format(dim=dim))
+        cur.execute(ddl.format(dim=dim))
 
-def load_preprocessed_json(path):
-    # load the json from disk or exit on error
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        logging.error(f"file not found: {path}")
-        sys.exit(1)
-    except json.JSONDecodeError:
-        logging.error(f"invalid json in file: {path}")
-        sys.exit(1)
-    logging.info(f"loaded {len(data)} conversations from {path}")
-    return data
-
-def flatten_conversations(conversations):
-    # produce a list of individual email dicts
-    flat = []
-    for conv in conversations:
-        conv_id = conv.get("conversation_id")
-        for em in conv.get("emails", []):
-            em["conversation_id"] = conv_id
-            flat.append(em)
-    return flat
-
-def fetch_existing_ids(conn):
-    # get set of email ids already in db
+def fetch_existing_email_ids(conn) -> set[str]:
+    # ids already stored
     with conn.cursor() as cur:
         cur.execute("select id from emails")
         return {row[0] for row in cur.fetchall()}
 
-def parse_email_date(date_str):
-    # convert rfc-2822 date to datetime or return None
-    if not date_str:
-        return None
+def fetch_existing_conversations(conn, conv_ids: List[str]) -> Dict[str, Tuple[List[float], int]]:
+    # existing conversations vectors and counts
+    if not conv_ids:
+        return {}
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            "select conversation_id, embedding, email_count from conversations where conversation_id in %s",
+            [tuple(conv_ids)],
+            fetch=True,
+        )
+        return {cid: (vec, cnt) for cid, vec, cnt in cur.fetchall()}  # type: ignore
+
+def strip_label(text: str | None) -> str | None:
+    # remove "Label: " from beginning
+    if not text:
+        return text
+    return text.split(":", 1)[-1].strip() if ":" in text[:15] else text
+
+def safe_int(value) -> int | None:
+    # parse int or none
     try:
-        return parsedate_to_datetime(date_str)
+        return int(value)
     except Exception:
         return None
 
-def prepare_upsert_rows(model, emails):
-    # build list of tuples for bulk upsert
-    rows = []
-    for em in emails:
-        text = " ".join(
-            part for part in (em.get("subject"), em.get("content")) if part
-        )
-        if not text.strip():
-            logging.warning(f"skipping email {em.get('id')}: empty subject/content")
-            continue
+def batch_encode(model: SentenceTransformer, texts: List[str]) -> List[List[float]]:
+    # encode in batches
+    vectors: List[List[float]] = []
+    total = len(texts)
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+        chunk = texts[start:end]
+        log.debug("encoding %d‒%d / %d", start + 1, end, total)
         try:
-            vector = model.encode(text, normalize_embeddings=True).tolist()
-        except Exception as e:
-            logging.error(f"embedding failed for {em.get('id')}: {e}")
-            continue
-        rows.append((
-            em["id"],
-            em.get("conversation_id"),
-            em.get("subject"),
-            em.get("from"),             # map json 'from' → column 'sender'
-            parse_email_date(em.get("date")),
-            em.get("order"),
-            em.get("content"),
-            Json(em),
-            vector,
-        ))
-    return rows
+            vectors.extend(model.encode(chunk, normalize_embeddings=True).tolist())
+        except Exception as err:
+            log.error("batch encode failed: %s", err)
+            # fallback to single item encode
+            for txt in chunk:
+                try:
+                    vectors.append(model.encode(txt, normalize_embeddings=True).tolist())
+                except Exception as sub_err:
+                    log.error("single encode failed, substituting zeros: %s", sub_err)
+                    vectors.append([0.0] * model.get_sentence_embedding_dimension())
+    return vectors
 
-def load_embedding_model():
-    # load sentence-transformers onnx model or exit on error
+# --- json load --------------------------------------------------------------
+def load_emails(path: Path) -> List[dict]:
+    # load json and flatten
+    log.info("loading %s", path)
     try:
-        model = SentenceTransformer(EMBED_MODEL_NAME, trust_remote_code=True)
-    except Exception as e:
-        logging.error(f"failed to load embedding model: {e}")
-        sys.exit(1)
-    dim = model.get_sentence_embedding_dimension()
-    if not isinstance(dim, int) or dim <= 0:
-        logging.error("model returned invalid embedding dimension")
-        sys.exit(1)
-    return model
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as err:
+        log.error("failed reading json: %s", err)
+        return []
+    emails: List[dict] = []
+    for conv in data:
+        conv_id = strip_label(conv.get("conversation_id"))
+        for em in conv.get("emails", []):
+            em["conversation_id"] = conv_id
+            emails.append(em)
+    return emails
 
-def main():
-    # 1. load and flatten emails
-    conversations = load_preprocessed_json(INPUT_PATH)
-    email_list = flatten_conversations(conversations)
+# --- main -------------------------------------------------------------------
+def main() -> None:
+    start_time = time.time()
 
-    # 2. load embedding model
-    model = load_embedding_model()
+    # load json
+    emails = load_emails(json_path)
+    if not emails:
+        log.warning("no emails loaded, exiting")
+        return
+    log.info("emails in file: %d", len(emails))
 
-    # 3. connect to db and ensure table exists
+    # init model
+    log.info("loading model %s", model_name)
+    model = SentenceTransformer(model_name, trust_remote_code=True, device="cpu")
+    embed_dim = model.get_sentence_embedding_dimension()
+
+    # db setup
+    log.info("connecting databases")
     try:
-        conn = open_db_connection()
-    except Exception as e:
-        logging.error(f"db connection failed: {e}")
-        sys.exit(1)
-    ensure_table_schema(conn, model.get_sentence_embedding_dimension())
+        email_db = open_db(email_db_cfg)
+        conversation_db = open_db(conversation_db_cfg)
+    except Exception as err:
+        log.error("db connect failed: %s", err)
+        return
 
-    # 4. find new emails and prepare rows
-    existing_ids = fetch_existing_ids(conn)
-    new_emails = [e for e in email_list if e["id"] not in existing_ids]
+    ensure_schema(email_db, email_ddl, embed_dim)
+    ensure_schema(conversation_db, conversation_ddl, embed_dim)
+
+    # filter new emails
+    stored_ids = fetch_existing_email_ids(email_db)
+    new_emails = [e for e in emails if strip_label(e.get("id")) not in stored_ids]
+    log.info("new emails: %d", len(new_emails))
     if not new_emails:
-        logging.info("database already up-to-date")
-        return
-    logging.info(f"processing {len(new_emails)} new emails")
-
-    rows = prepare_upsert_rows(model, new_emails)
-    if not rows:
-        logging.info("no valid emails to upsert")
+        log.info("nothing to embed, done")
         return
 
-    # 5. bulk upsert into postgres
+    # build texts
+    email_texts: List[str] = []
+    for em in new_emails:
+        subject = em.get("subject") or ""
+        body = em.get("content") or ""
+        email_texts.append(f"{subject} {body}".strip())
+
+    # encode
+    vectors = batch_encode(model, email_texts)
+
+    # prep rows and convo aggregates
+    email_rows = []
+    convo_vectors: Dict[str, List[List[float]]] = {}
+    for em, vec in zip(new_emails, vectors):
+        email_id = strip_label(em.get("id"))
+        conv_id = strip_label(em.get("conversation_id"))
+        subject = strip_label(em.get("subject"))
+        sender = strip_label(em.get("from"))
+        date_val = parsedate_to_datetime(strip_label(em.get("date") or "")) if em.get("date") else None
+        order_val = safe_int(em.get("order"))
+
+        email_rows.append(
+            (
+                email_id,
+                conv_id,
+                subject,
+                sender,
+                date_val,
+                order_val,
+                em.get("content"),
+                Json(em),
+                vec,
+            )
+        )
+        convo_vectors.setdefault(conv_id, []).append(vec)
+
+    # upsert emails
     try:
-        with conn, conn.cursor() as cur:
-            execute_values(cur, UPSERT_SQL, rows, page_size=500)
-    except Exception as e:
-        logging.error(f"db upsert failed: {e}")
-        sys.exit(1)
+        with email_db, email_db.cursor() as cur:
+            execute_values(cur, email_upsert_sql, email_rows, page_size=500)
+            log.info("email rows upserted: %d", len(email_rows))
+    except Exception as err:
+        log.error("email upsert failed: %s", err)
 
-    logging.info("successfully stored new emails and embeddings")
+    # update conversations
+    existing_conv = fetch_existing_conversations(conversation_db, list(convo_vectors.keys()))
+    convo_rows = []
+    for cid, new_vec_list in convo_vectors.items():
+        new_count = len(new_vec_list)
+        new_sum = [sum(col) for col in zip(*new_vec_list)]
 
+        if cid in existing_conv:
+            old_vec, old_count = existing_conv[cid]
+            total = old_count + new_count
+            merged_vec = [
+                (old_val * old_count + add_val) / total
+                for old_val, add_val in zip(old_vec, new_sum)
+            ]
+            convo_rows.append((cid, total, merged_vec))
+        else:
+            avg_vec = [val / new_count for val in new_sum]
+            convo_rows.append((cid, new_count, avg_vec))
+
+    try:
+        with conversation_db, conversation_db.cursor() as cur:
+            execute_values(cur, conversation_upsert_sql, convo_rows, page_size=200)
+            log.info("conversation rows upserted: %d", len(convo_rows))
+    except Exception as err:
+        log.error("conversation upsert failed: %s", err)
+
+    elapsed = time.time() - start_time
+    log.info("done in %.1f seconds", elapsed)
+
+# entry
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.warning("interrupted by user")
