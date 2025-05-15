@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-# store_and_embed.py
-# modular toolkit for pgvector email-and-conversation stores
-
-"""
-public api
-----------
-create_or_update(json_path, email_db_cfg, conv_db_cfg, …)  # auto
-create_all(json_path, email_db_cfg, conv_db_cfg, …)        # full ingest
-update_all(json_path, email_db_cfg, conv_db_cfg, …)        # incremental
-
-each returns (emails_written, conversations_written)
-running this file directly calls create_or_update() with env-derived cfg
-"""
+# mailmule_store.py – unified pgvector email/conversation loader
+#
+# Public API
+#  ├─ create_all(json_path, email_db_cfg, conv_db_cfg, …)
+#  ├─ update_all(json_path, email_db_cfg, conv_db_cfg, …)
+#  └─ create_or_update(json_path, email_db_cfg, conv_db_cfg, …)
+#
+# Each returns (emails_written:int, conversations_written:int).
+#
+# Running this file directly chooses create_or_update() automatically.
 
 from __future__ import annotations
 
@@ -21,23 +18,23 @@ import time
 import logging
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 import psycopg2
 from psycopg2.extras import Json, execute_values
 from sentence_transformers import SentenceTransformer
 
-# --- logging -----------------------------------------------------------------
+# ────────────────────────────── logging ───────────────────────────────────────
 log = logging.getLogger("mailmule")
 if not log.handlers:
-    _lvl = logging.DEBUG if os.getenv("MAILMULE_DEBUG") else logging.INFO
+    level = logging.DEBUG if os.getenv("MAILMULE_DEBUG") else logging.INFO
     logging.basicConfig(
-        level=_lvl,
+        level=level,
         format="%(asctime)s | %(levelname)-8s | %(message)s",
         datefmt="%H:%M:%S",
     )
 
-# --- ddl strings -------------------------------------------------------------
+# ────────────────────────────── DDL / SQL ─────────────────────────────────────
 EMAIL_DDL = """
 create extension if not exists vector;
 create table if not exists emails (
@@ -79,23 +76,48 @@ set email_count = excluded.email_count,
     embedding    = excluded.embedding;
 """
 
-# --- helpers -----------------------------------------------------------------
-def open_db(cfg: dict):
-    return psycopg2.connect(**cfg)
+# ────────────────────────────── helpers ───────────────────────────────────────
+def db_connect(cfg: dict, retries: int = 3, backoff: float = 2.0):
+    """
+    Connect to Postgres with exponential-backoff retry.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return psycopg2.connect(**cfg)
+        except psycopg2.OperationalError as err:
+            if attempt >= retries:
+                log.error("DB connection failed after %d attempts: %s", attempt, err)
+                raise
+            sleep = backoff ** attempt
+            log.warning("DB connection failed (attempt %d/%d) – retrying in %.1fs",
+                        attempt, retries, sleep)
+            time.sleep(sleep)
+
 
 def table_exists(conn, name: str) -> bool:
     with conn.cursor() as cur:
         cur.execute("select to_regclass(%s)", (name,))
         return cur.fetchone()[0] is not None
 
+
 def ensure_schema(conn, ddl: str, dim: int) -> None:
+    """
+    Always run the CREATE IF NOT EXISTS DDL. Cheap, idempotent, and covers upgrades.
+    """
     with conn, conn.cursor() as cur:
         cur.execute(ddl.format(dim=dim))
 
-def strip_label(text: str | None) -> str | None:
+
+def strip_label(text: Optional[str]) -> Optional[str]:
+    """
+    Remove an optional 'Label: value' prefix produced by preprocess_emails_for_embeddings.
+    """
     if not text:
         return text
     return text.split(":", 1)[-1].strip() if ":" in text[:15] else text
+
 
 def safe_int(val):
     try:
@@ -103,9 +125,20 @@ def safe_int(val):
     except Exception:
         return None
 
-# --- json --------------------------------------------------------------------
+# ────────────────────────────── JSON loader ──────────────────────────────────
 def load_flat_emails(path: Path) -> List[dict]:
-    data = json.loads(path.read_text("utf-8"))
+    """
+    Flatten the conversation-centric JSON into a list of email dicts.
+    """
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        log.error("JSON file %s not found – run the extractor first?", path)
+        return []
+    except json.JSONDecodeError as err:
+        log.error("JSON file %s is malformed: %s", path, err)
+        return []
+
     flat: List[dict] = []
     for conv in data:
         cid = strip_label(conv.get("conversation_id"))
@@ -114,19 +147,23 @@ def load_flat_emails(path: Path) -> List[dict]:
             flat.append(em)
     return flat
 
-# --- batching ----------------------------------------------------------------
+# ────────────────────────────── batching / enc ───────────────────────────────
 def encode_batches(
     model: SentenceTransformer,
     texts: List[str],
     batch_size: int,
 ) -> List[List[float]]:
+    """
+    Robust batch-encoder: if a batch fails, fall back to per-item encode
+    (copying pattern from both original scripts).
+    """
     vecs: List[List[float]] = []
     for start in range(0, len(texts), batch_size):
         chunk = texts[start : start + batch_size]
         try:
             vecs.extend(model.encode(chunk, normalize_embeddings=True).tolist())
         except Exception as err:
-            log.error("batch encode failed, fallback to singles: %s", err)
+            log.error("batch encode failed → reverting to single items: %s", err)
             for txt in chunk:
                 try:
                     vecs.append(model.encode(txt, normalize_embeddings=True).tolist())
@@ -134,16 +171,21 @@ def encode_batches(
                     vecs.append([0.0] * model.get_sentence_embedding_dimension())
     return vecs
 
-# --- row builders ------------------------------------------------------------
 def build_rows(
     model: SentenceTransformer,
     emails: List[dict],
     batch_size: int,
-) -> tuple[List[tuple], Dict[str, List[List[float]]]]:
+) -> Tuple[List[tuple], Dict[str, List[List[float]]]]:
+    """
+    Transform email dicts into:
+        - email_rows  (list of tuples suitable for execute_values)
+        - conv_vectors {conversation_id: [embedding, …]}
+    """
     texts = [
         " ".join(filter(None, (em.get("subject"), em.get("content")))) for em in emails
     ]
     vectors = encode_batches(model, texts, batch_size)
+
     email_rows: List[tuple] = []
     conv_vecs: Dict[str, List[List[float]]] = {}
 
@@ -155,7 +197,7 @@ def build_rows(
                 eid,
                 cid,
                 strip_label(em.get("subject")),
-                strip_label(em.get("from")),
+                strip_label(em.get("from") or em.get("sender")),
                 parsedate_to_datetime(strip_label(em.get("date") or "")) if em.get("date") else None,
                 safe_int(em.get("order")),
                 em.get("content"),
@@ -170,40 +212,58 @@ def merge_conv_vectors(
     existing: Dict[str, Tuple[List[float], int]],
     incoming: Dict[str, List[List[float]]],
 ) -> List[tuple]:
-    out = []
+    """
+    Merge old + new vectors by weighted average.
+    existing  = {conversation_id: (vector, email_count)}
+    incoming  = {conversation_id: [vec, vec, …]}
+    Returns rows ready for CONV_UPSERT.
+    """
+    rows: List[tuple] = []
     for cid, vecs in incoming.items():
         new_cnt = len(vecs)
         new_sum = [sum(col) for col in zip(*vecs)]
+
         if cid in existing:
             old_vec, old_cnt = existing[cid]
             tot = old_cnt + new_cnt
-            merged = [
-                (o * old_cnt + s) / tot for o, s in zip(old_vec, new_sum)
-            ]
-            out.append((cid, tot, merged))
+            merged = [(o * old_cnt + s) / tot for o, s in zip(old_vec, new_sum)]
+            rows.append((cid, tot, merged))
         else:
             avg = [v / new_cnt for v in new_sum]
-            out.append((cid, new_cnt, avg))
-    return out
+            rows.append((cid, new_cnt, avg))
+    return rows
 
-# --- api ---------------------------------------------------------------------
+# ────────────────────────────── API functions ────────────────────────────────
 def create_all(
     json_path: Path | str,
     email_db_cfg: dict,
     conv_db_cfg: dict,
     model_name: str = "BAAI/bge-m3",
     batch_size: int = 64,
-) -> tuple[int, int]:
+) -> Tuple[int, int]:
+    """
+    First-time ingestion. If tables already exist, this automatically
+    falls back to update_all() so callers don’t have to think about it.
+    """
+    # quick existence check so we can skip redundant work
+    conn_check = db_connect(email_db_cfg, retries=1)
+    if table_exists(conn_check, "emails"):
+        log.info("Tables already exist – create_all() will run update_all() instead.")
+        conn_check.close()
+        return update_all(json_path, email_db_cfg, conv_db_cfg,
+                          model_name=model_name, batch_size=batch_size)
+    conn_check.close()
+
     emails = load_flat_emails(Path(json_path))
     if not emails:
-        log.warning("no emails found")
+        log.warning("create_all: 0 emails found in JSON – nothing to do.")
         return 0, 0
 
     model = SentenceTransformer(model_name, trust_remote_code=True, device="cpu")
     dim = model.get_sentence_embedding_dimension()
 
-    email_db = open_db(email_db_cfg)
-    conv_db = open_db(conv_db_cfg)
+    email_db = db_connect(email_db_cfg)
+    conv_db  = db_connect(conv_db_cfg)
     ensure_schema(email_db, EMAIL_DDL, dim)
     ensure_schema(conv_db,  CONV_DDL,  dim)
 
@@ -216,8 +276,10 @@ def create_all(
     with conv_db, conv_db.cursor() as cur:
         execute_values(cur, CONV_UPSERT, conv_rows, page_size=200)
 
-    log.info("create_all: %d emails, %d conversations", len(email_rows), len(conv_rows))
+    log.info("create_all: inserted %d emails, %d conversations",
+             len(email_rows), len(conv_rows))
     return len(email_rows), len(conv_rows)
+
 
 def update_all(
     json_path: Path | str,
@@ -225,26 +287,31 @@ def update_all(
     conv_db_cfg: dict,
     model_name: str = "BAAI/bge-m3",
     batch_size: int = 64,
-) -> tuple[int, int]:
+) -> Tuple[int, int]:
+    """
+    Incremental ingest: only new email IDs are embedded and stored.
+    """
     emails = load_flat_emails(Path(json_path))
     if not emails:
+        log.warning("update_all: 0 emails found in JSON – nothing to do.")
         return 0, 0
 
     model = SentenceTransformer(model_name, trust_remote_code=True, device="cpu")
     dim = model.get_sentence_embedding_dimension()
 
-    email_db = open_db(email_db_cfg)
-    conv_db = open_db(conv_db_cfg)
-    ensure_schema(email_db, EMAIL_DDL, dim)
+    email_db = db_connect(email_db_cfg)
+    conv_db  = db_connect(conv_db_cfg)
+    ensure_schema(email_db, EMAIL_DDL, dim)   # self-heal even on updates
     ensure_schema(conv_db,  CONV_DDL,  dim)
 
+    # fetch existing email IDs
     with email_db.cursor() as cur:
         cur.execute("select id from emails")
         existing_ids = {row[0] for row in cur.fetchall()}
 
     new_emails = [e for e in emails if strip_label(e.get("id")) not in existing_ids]
     if not new_emails:
-        log.info("update_all: no new emails")
+        log.info("update_all: database already up-to-date – no new emails.")
         return 0, 0
 
     email_rows, conv_vecs = build_rows(model, new_emails, batch_size)
@@ -252,27 +319,28 @@ def update_all(
     with email_db, email_db.cursor() as cur:
         execute_values(cur, EMAIL_UPSERT, email_rows, page_size=500)
 
+    # merge + upsert conversation vectors
     if conv_vecs:
         cid_list = list(conv_vecs.keys())
-        existing_conv = {}
-        if cid_list:
-            with conv_db.cursor() as cur:
-                cur.execute(
-                    "select conversation_id, embedding, email_count "
-                    "from conversations where conversation_id = any(%s)",
-                    (cid_list,),
-                )
-                existing_conv = {
-                    cid: (vec, cnt) for cid, vec, cnt in cur.fetchall()
-                }
+        existing_conv: Dict[str, Tuple[List[float], int]] = {}
+        with conv_db.cursor() as cur:
+            cur.execute(
+                "select conversation_id, embedding, email_count "
+                "from conversations where conversation_id = any(%s)",
+                (cid_list,),
+            )
+            existing_conv = {cid: (vec, cnt) for cid, vec, cnt in cur.fetchall()}
+
         conv_rows = merge_conv_vectors(existing_conv, conv_vecs)
         with conv_db, conv_db.cursor() as cur:
             execute_values(cur, CONV_UPSERT, conv_rows, page_size=200)
     else:
         conv_rows = []
 
-    log.info("update_all: %d emails, %d conversations", len(email_rows), len(conv_rows))
+    log.info("update_all: inserted %d new emails, updated %d conversations",
+             len(email_rows), len(conv_rows))
     return len(email_rows), len(conv_rows)
+
 
 def create_or_update(
     json_path: Path | str,
@@ -280,19 +348,23 @@ def create_or_update(
     conv_db_cfg: dict,
     model_name: str = "BAAI/bge-m3",
     batch_size: int = 64,
-) -> tuple[int, int]:
-    try:
-        conn = open_db(email_db_cfg)
-    except Exception as err:
-        log.error("cannot connect to email db: %s", err)
-        return 0, 0
+) -> Tuple[int, int]:
+    """
+    Smart helper: if the tables exist → update, otherwise → create.
+    """
+    conn = db_connect(email_db_cfg, retries=1)
+    is_init = not table_exists(conn, "emails")
+    conn.close()
+    if is_init:
+        return create_all(json_path, email_db_cfg, conv_db_cfg,
+                          model_name=model_name, batch_size=batch_size)
+    return update_all(json_path, email_db_cfg, conv_db_cfg,
+                      model_name=model_name, batch_size=batch_size)
 
-    if table_exists(conn, "emails"):
-        return update_all(json_path, email_db_cfg, conv_db_cfg, model_name, batch_size)
-    return create_all(json_path, email_db_cfg, conv_db_cfg, model_name, batch_size)
-
-# --- cli entry ---------------------------------------------------------------
+# ────────────────────────────── CLI entrypoint ───────────────────────────────
 if __name__ == "__main__":
+    import argparse
+
     JSON_PATH = Path("server_client_local_files/preprocessed_emails.json")
     EMAIL_DB_CFG = dict(
         host=os.getenv("PGHOST", "localhost"),
@@ -303,20 +375,24 @@ if __name__ == "__main__":
     )
     CONV_DB_CFG = dict(EMAIL_DB_CFG, dbname=os.getenv("PGCONV_DB", "mailmule_conv_db"))
 
+    parser = argparse.ArgumentParser(description="MailMule pgvector loader")
+    parser.add_argument("--create", action="store_true", help="force full create")
+    parser.add_argument("--update", action="store_true", help="force incremental update")
+    parser.add_argument("--json",   help="path to preprocessed_emails.json", default=JSON_PATH)
+
+    args = parser.parse_args()
+    json_path = Path(args.json)
+
     start = time.time()
     try:
-        emails_written, conv_written = create_or_update(
-            JSON_PATH,
-            EMAIL_DB_CFG,
-            CONV_DB_CFG,
-            model_name="BAAI/bge-m3",
-            batch_size=64,
-        )
-        log.info(
-            "finished: %d emails, %d conversations in %.1f s",
-            emails_written,
-            conv_written,
-            time.time() - start,
-        )
+        if args.create:
+            e, c = create_all(json_path, EMAIL_DB_CFG, CONV_DB_CFG)
+        elif args.update:
+            e, c = update_all(json_path, EMAIL_DB_CFG, CONV_DB_CFG)
+        else:
+            e, c = create_or_update(json_path, EMAIL_DB_CFG, CONV_DB_CFG)
+
+        log.info("done – %d emails, %d conversations (%.1fs)",
+                 e, c, time.time() - start)
     except KeyboardInterrupt:
-        log.warning("interrupted by user")
+        log.warning("cancelled by user")
