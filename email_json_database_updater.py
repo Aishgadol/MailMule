@@ -1,163 +1,252 @@
 #!/usr/bin/env python3
 """
-incremental_email_updater.py - Updates existing email database with new messages
+email_json_database_updater.py
+Incrementally appends any brand-new Gmail messages to
+server_client_local_files/emails.json, preserving the
+conversation structure created by gmail_json_extractor_to_json_best.py.
+
+First-run ingestion:   gmail_json_extractor_to_json_best.py
+Subsequent updates:    email_json_database_updater.py   ← this file
 """
+
+from __future__ import annotations
 
 import json
 import sys
+import time
+import datetime as dt
+from pathlib import Path
 from email.utils import parsedate_to_datetime
 
-# Shared functions from gmail_json_extractor_to_json_best.py
+# heavy-duty helpers (build_service, extract_email_data, etc.)
 from gmail_json_extractor_to_json_best import build_service, extract_email_data
 
-# Preprocessing function from preprocess_emails_for_embeddings.py
+# downstream embedding pre-processor
 from preprocess_emails_for_embeddings import main as preprocess_main
 
+# ────────────────────────────────────────────────────────────────────────────────
 # Configuration
-EXISTING_EMAILS_FILE = "server_client_local_files/emails.json"
+# ────────────────────────────────────────────────────────────────────────────────
+DATA_FILE = Path("server_client_local_files/emails.json")
+BATCH_SIZE = 200          # how many message IDs to pull per API page
+MAX_PAGES  = 50           # absolute safety cap
+LOG_PREFIX = "[UPDATER]"
 
 
-def load_existing_data():
-    """Load existing emails, build ID lookup and conversation map."""
+# ────────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ────────────────────────────────────────────────────────────────────────────────
+def load_existing() -> tuple[list[dict], set[str], dict[str, dict], int | None]:
+    """
+    Returns:
+        conversations : list[dict]   – decoded top-level JSON (may be empty)
+        existing_ids  : set[str]     – every Gmail message id already stored
+        conv_map      : {threadId → conversation-dict}
+        newest_epoch  : int | None   – unix time of newest stored email (UTC)
+    """
+    if not DATA_FILE.exists():
+        print(f"{LOG_PREFIX} {DATA_FILE} not found. Creating new DB.")
+        return [], set(), {}, None
+
     try:
-        with open(EXISTING_EMAILS_FILE, 'r', encoding='utf-8') as f:
-            existing_convs = json.load(f)
-        print(f"[INFO] Loaded {len(existing_convs)} conversations from {EXISTING_EMAILS_FILE}")
-    except FileNotFoundError:
-        print(f"[WARN] {EXISTING_EMAILS_FILE} not found. Starting with empty database.")
-        existing_convs = []
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] Failed to parse {EXISTING_EMAILS_FILE}: {e}")
+        conversations = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"{LOG_PREFIX} ERROR – cannot parse {DATA_FILE}: {e}")
         sys.exit(1)
 
-    existing_ids = set()
-    conv_map = {}
-    for conv in existing_convs:
-        cid = conv.get('conversation_id')
+    existing_ids: set[str] = set()
+    conv_map: dict[str, dict] = {}
+    newest_dt: dt.datetime | None = None
+
+    for conv in conversations:
+        cid = conv.get("conversation_id")
         conv_map[cid] = conv
-        for em in conv.get('emails', []):
-            eid = em.get('id')
-            if eid:
-                existing_ids.add(eid)
-    print(f"[INFO] Found {len(existing_ids)} existing email IDs")
-    return existing_convs, existing_ids, conv_map
-
-
-def find_new_messages(service, existing_ids):
-    """Fetch new messages until an existing ID is encountered."""
-    new_msgs = []
-    page_token = None
-    stop = False
-
-    while not stop:
-        print(f"[INFO] Listing Gmail messages (page_token={page_token})")
-        try:
-            resp = service.users().messages().list(
-                userId='me', labelIds=['INBOX','SENT'], maxResults=100, pageToken=page_token
-            ).execute()
-        except Exception as e:
-            print(f"[ERROR] Gmail list failed: {e}")
-            break
-
-        msgs = resp.get('messages', [])
-        if not msgs:
-            print("[INFO] No more messages returned.")
-            break
-
-        for m in msgs:
-            mid = m.get('id')
-            print(f"  Checking message id={mid}...", end=' ')
-            if mid in existing_ids:
-                print("exists, stopping fetch.")
-                stop = True
-                break
-
-            print("new, fetching details.")
+        for em in conv.get("emails", []):
+            mid = em.get("id")
+            if mid:
+                existing_ids.add(mid)
             try:
-                full = service.users().messages().get(
-                    userId='me', id=mid, format='full'
-                ).execute()
-                data = extract_email_data(service, full)
-            except Exception as e:
-                print(f"[ERROR] Failed to fetch/process {mid}: {e}")
-                continue
+                em_dt = parsedate_to_datetime(em["date"])
+                if newest_dt is None or em_dt > newest_dt:
+                    newest_dt = em_dt
+            except Exception:
+                pass
 
-            if not data.get('content'):
-                print(f"[WARN] id={mid} has empty content, skipping.")
-                continue
+    newest_epoch = int(newest_dt.timestamp()) if newest_dt else None
+    print(
+        f"{LOG_PREFIX} loaded {len(conversations)} conversations "
+        f"({len(existing_ids)} messages, newest={newest_dt})"
+    )
+    return conversations, existing_ids, conv_map, newest_epoch
 
-            subj = data.get('subject','')
-            print(f"  → Queued new email id={mid}, subject='{subj[:50]}'")
-            new_msgs.append(data)
 
-        page_token = resp.get('nextPageToken')
-        if stop or not page_token:
+def gmail_search_query(newest_epoch: int | None) -> str:
+    """
+    Build a Gmail search string:
+        after:<unix-time>  AND  (in:inbox OR in:sent)
+    """
+    date_filter = f"after:{newest_epoch}" if newest_epoch else ""
+    # 'OR' works in Gmail search queries
+    label_filter = "(in:inbox)"
+    query = " ".join(x for x in (date_filter, label_filter) if x)
+    return query or label_filter  # never return ""
+
+
+def fetch_new_message_ids(service, q: str) -> list[str]:
+    """
+    Retrieve *only* the message IDs matching the search query.
+    """
+    new_ids: list[str] = []
+    page_token = None
+    page = 0
+
+    while page < MAX_PAGES:
+        page += 1
+        try:
+            resp = (
+                service.users()
+                .messages()
+                .list(
+                    userId="me",
+                    q=q,
+                    maxResults=BATCH_SIZE,
+                    pageToken=page_token,
+                    includeSpamTrash=False,
+                )
+                .execute()
+            )
+        except Exception as e:
+            print(f"{LOG_PREFIX} ERROR – Gmail list API failed: {e}")
             break
 
-    print(f"[INFO] Collected {len(new_msgs)} new message(s)")
-    return list(reversed(new_msgs))  # oldest first
+        ids_in_page = [m["id"] for m in resp.get("messages", [])]
+        print(f"{LOG_PREFIX} page {page}: {len(ids_in_page)} msg-ids")
+        new_ids.extend(ids_in_page)
+
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+
+    return new_ids
 
 
-def merge_conversations(conv_map, new_msgs):
-    """Insert new messages into conversation map, sort & renumber."""
-    for msg in new_msgs:
-        cid = msg.get('conversation_id')
-        if not cid:
+def hydrate_messages(service, ids: list[str], existing_ids: set[str]) -> list[dict]:
+    """
+    For every id not yet stored, download full message & parse with extract_email_data().
+    """
+    fresh_messages: list[dict] = []
+    for mid in ids:
+        if mid in existing_ids:
             continue
-        if cid not in conv_map:
-            conv_map[cid] = {'conversation_id': cid, 'emails': []}
-        conv_map[cid]['emails'].append(msg)
-
-    merged = []
-    for conv in conv_map.values():
-        emails = conv.get('emails', [])
         try:
-            emails.sort(key=lambda x: parsedate_to_datetime(x.get('date','')))
+            raw = (
+                service.users()
+                .messages()
+                .get(userId="me", id=mid, format="full")
+                .execute()
+            )
+            data = extract_email_data(service, raw)
+        except Exception as e:
+            print(f"{LOG_PREFIX} WARN – could not fetch {mid}: {e}")
+            continue
+
+        if not data.get("content"):
+            # skip completely empty bodies
+            continue
+
+        fresh_messages.append(data)
+
+    print(f"{LOG_PREFIX} fetched {len(fresh_messages)} new full messages")
+    return fresh_messages
+
+
+def merge_into_conversations(
+    conv_map: dict[str, dict], new_msgs: list[dict]
+) -> list[dict]:
+    """Insert new messages into conv_map, sort, and re-assign `order` indices."""
+    for msg in new_msgs:
+        cid = msg.get("conversation_id")
+        if not cid:
+            # should not happen, but don't crash updater
+            continue
+        conv = conv_map.setdefault(cid, {"conversation_id": cid, "emails": []})
+        conv["emails"].append(msg)
+
+    merged: list[dict] = []
+    for conv in conv_map.values():
+        emails = conv.get("emails", [])
+        try:
+            emails.sort(key=lambda e: parsedate_to_datetime(e["date"]))
         except Exception:
             pass
-        # renumber order
         for idx, em in enumerate(emails, start=1):
-            em['order'] = idx
-        merged.append({'conversation_id': conv['conversation_id'], 'emails': emails})
+            em["order"] = idx
+        merged.append({"conversation_id": conv["conversation_id"], "emails": emails})
 
-    print(f"[INFO] Merged into {len(merged)} conversations")
+    print(f"{LOG_PREFIX} merged total conversations: {len(merged)}")
     return merged
 
 
-def save_updated_data(updated_convs):
-    """Save raw JSON and run preprocessing pipeline."""
+def save_and_preprocess(conversations: list[dict]) -> None:
+    """Overwrite emails.json and re-run preprocessing step."""
     try:
-        with open(EXISTING_EMAILS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(updated_convs, f, ensure_ascii=False, indent=2)
-        print(f"[INFO] Saved updated database with {len(updated_convs)} conversations")
-    except Exception as e:
-        print(f"[ERROR] Cannot write {EXISTING_EMAILS_FILE}: {e}")
+        DATA_FILE.write_text(
+            json.dumps(conversations, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(
+            f"{LOG_PREFIX} wrote {len(conversations)} conversations → {DATA_FILE.name}"
+        )
+    except OSError as e:
+        print(f"{LOG_PREFIX} CRITICAL – cannot save JSON: {e}")
         sys.exit(1)
 
-    # regenerate preprocessed_emails.json in-process
+    # regenerate preprocessed_emails.json
     try:
-        print("[INFO] Regenerating preprocessed_emails.json ...")
+        print(f"{LOG_PREFIX} running downstream preprocessing …")
         preprocess_main()
-        print("[INFO] Preprocessing completed successfully.")
     except Exception as e:
-        print(f"[ERROR] Preprocessing failed: {e}")
+        print(f"{LOG_PREFIX} CRITICAL – preprocessing failed: {e}")
         sys.exit(1)
 
 
-def main():
+# ────────────────────────────────────────────────────────────────────────────────
+# Main
+# ────────────────────────────────────────────────────────────────────────────────
+def main() -> None:
+    # 1) read what we already have
+    conversations, existing_ids, conv_map, newest_epoch = load_existing()
+
+    # 2) connect to Gmail
+    service = build_service()
+
+    # 3) build query & fetch IDs
+    query = gmail_search_query(newest_epoch)
+    print(f"{LOG_PREFIX} Gmail query → {query!r}")
+    candidate_ids = fetch_new_message_ids(service, query)
+
+    # nothing at all?
+    unseen_ids = [mid for mid in candidate_ids if mid not in existing_ids]
+    if not unseen_ids:
+        print(f"{LOG_PREFIX} up-to-date – no new messages.")
+        return
+
+    # 4) hydrate & parse
+    fresh_messages = hydrate_messages(service, unseen_ids, existing_ids)
+
+    if not fresh_messages:
+        print(f"{LOG_PREFIX} no parsable new messages.")
+        return
+
+    # 5) merge & persist
+    merged_conversations = merge_into_conversations(conv_map, fresh_messages)
+    save_and_preprocess(merged_conversations)
+    print(f"{LOG_PREFIX} update complete – added {len(fresh_messages)} messages.")
+
+
+if __name__ == "__main__":
+    start = time.perf_counter()
     try:
-        existing_convs, existing_ids, conv_map = load_existing_data()
-        service = build_service()
-        new_msgs = find_new_messages(service, existing_ids)
-        if not new_msgs:
-            print("[INFO] No new messages to add.")
-            return
-        updated_convs = merge_conversations(conv_map, new_msgs)
-        save_updated_data(updated_convs)
-        print("[INFO] Update complete.")
-    except Exception as e:
-        print(f"[CRITICAL] Unexpected error: {e}")
-        sys.exit(1)
-
-if __name__ == '__main__':
-    main()
+        main()
+    finally:
+        elapsed = time.perf_counter() - start
+        print(f"{LOG_PREFIX} finished in {elapsed:0.1f}s")
