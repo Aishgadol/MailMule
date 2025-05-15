@@ -1,156 +1,154 @@
 #!/usr/bin/env python3
-"""
-store_and_embed.py
+# store_and_embed.py
+# read a preprocessed_emails.json file, embed each email with bge-m3 (onnx),
+# and upsert both raw json + embedding into a postgres table with pgvector
 
-▪ Input : path to preprocessed_emails.json (MailMule format)
-▪ Task  : upsert every email → Postgres (raw JSON) and pgvector embedding
-▪ Notes : first run seeds the DB; later runs only process new IDs
-"""
-
-import json, os, sys, datetime as dt
+import os
+import sys
+import json
 from pathlib import Path
+from email.utils import parsedate_to_datetime
 
 import psycopg2
 from psycopg2.extras import Json, execute_values
 from sentence_transformers import SentenceTransformer
 
-
-# ─── configuration ─────────────────────────────────────────────────────────────
-PG_CONN = {
-    "host"    : os.getenv("PGHOST", "localhost"),
-    "port"    : os.getenv("PGPORT", "5432"),
-    "user"    : os.getenv("PGUSER", "mailmule"),
+# ─── configuration pulled from env vars with sensible defaults ────────────────
+PG_CFG = {
+    "host":     os.getenv("PGHOST", "localhost"),
+    "port":     os.getenv("PGPORT", "5432"),
+    "user":     os.getenv("PGUSER", "mailmule"),
     "password": os.getenv("PGPASSWORD", "mailmule"),
-    "dbname"  : os.getenv("PGDATABASE", "mailmule"),
+    "dbname":   os.getenv("PGDATABASE", "mailmule"),
 }
-JSON_PATH = Path(sys.argv[1] if len(sys.argv) > 1 else
-                 "server_client_local_files/preprocessed_emails.json")
-MODEL_NAME = "BAAI/bge-m3"
 
-# ─── database helpers ──────────────────────────────────────────────────────────
-DDL = """
-CREATE EXTENSION IF NOT EXISTS pgvector;
-CREATE TABLE IF NOT EXISTS emails (
-    id             TEXT PRIMARY KEY,
-    conversation_id TEXT,
-    subject        TEXT,
-    sender         TEXT,
-    date           TIMESTAMPTZ,
-    order_in_conv  INT,
-    content        TEXT,
-    raw            JSONB,
-    embedding      VECTOR(%d)
+JSON_FILE = Path(
+    sys.argv[1] if len(sys.argv) > 1
+    else "server_client_local_files/preprocessed_emails.json"
+)
+
+MODEL_NAME = "BAAI/bge-m3"          # sentence-transformers pulls onnx version
+
+# ─── ddl for the single table we need ─────────────────────────────────────────
+DDL_TEMPLATE = """
+create extension if not exists pgvector;
+create table if not exists emails (
+    id              text primary key,
+    conversation_id text,
+    subject         text,
+    sender          text,
+    date            timestamptz,
+    order_in_conv   int,
+    content         text,
+    raw             jsonb,
+    embedding       vector({dim})
 );
 """
 
+# upsert with do-nothing on conflict keeps existing rows unchanged
 UPSERT_SQL = """
-INSERT INTO emails
+insert into emails
 (id, conversation_id, subject, sender, date,
  order_in_conv, content, raw, embedding)
-VALUES %s
-ON CONFLICT (id) DO NOTHING;
+values %s
+on conflict (id) do nothing;
 """
 
+# ─── helper: open a db connection ─────────────────────────────────────────────
+def open_connection():
+    # psycopg2 connects using the cfg dict
+    return psycopg2.connect(**PG_CFG)
 
-def open_db():
-    return psycopg2.connect(**PG_CONN)
-
-
-def ensure_schema(conn, dim: int):
+# ─── helper: create table if first run ────────────────────────────────────────
+def ensure_schema(conn, dim):
+    # executes ddl with correct embedding dimension
+    ddl = DDL_TEMPLATE.format(dim=dim)
     with conn, conn.cursor() as cur:
-        cur.execute(DDL % dim)
+        cur.execute(ddl)
 
-
-# ─── ingestion logic ───────────────────────────────────────────────────────────
-def load_json() -> list[dict]:
-    try:
-        data = json.loads(JSON_PATH.read_text(encoding="utf-8"))
-        print(f"[INFO] loaded {JSON_PATH} ({len(data)} conversations)")
-        return data
-    except Exception as e:
-        sys.exit(f"[FATAL] cannot read {JSON_PATH}: {e}")
-
-
-def flatten(conversations: list[dict]) -> list[dict]:
-    """Return a flat list with one dict per *email* (preserves raw)."""
+# ─── helper: flatten conversations to individual emails ──────────────────────
+def flatten_conversations(conversations):
+    # each object in json has conversation_id and list "emails"
     flat = []
     for conv in conversations:
-        cid = conv.get("conversation_id")
-        for em in conv.get("emails", []):
-            em["conversation_id"] = cid
-            flat.append(em)
+        conv_id = conv.get("conversation_id")
+        for email in conv.get("emails", []):
+            email["conversation_id"] = conv_id
+            flat.append(email)
     return flat
 
+# ─── helper: read local json file ─────────────────────────────────────────────
+def load_json(path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    print(f"loaded {len(data)} conversations from {path}")
+    return data
 
-def fetch_existing_ids(conn) -> set[str]:
+# ─── helper: get set of ids already stored ───────────────────────────────────
+def fetch_existing_ids(conn):
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM emails")
-        return {r[0] for r in cur.fetchall()}
+        cur.execute("select id from emails")
+        return {row[0] for row in cur.fetchall()}
 
+# ─── helper: safe date parse ─────────────────────────────────────────────────
+def parse_date(date_str):
+    # returns datetime or None if parse fails
+    try:
+        return parsedate_to_datetime(date_str) if date_str else None
+    except Exception:
+        return None
 
-def build_embedding(model, email: dict) -> list[float]:
-    text = " ".join(
-        x for x in (email.get("subject", ""), email.get("content", "")) if x
-    )
-    return model.encode(text, normalize_embeddings=True).tolist()
-
-
-def rows_for_upsert(model, emails: list[dict]) -> list[tuple]:
+# ─── build list of rows for bulk insert ──────────────────────────────────────
+def prepare_rows(model, emails):
     rows = []
-    for em in emails:
-        emb = build_embedding(model, em)
+    for email in emails:
+        # embed subject + body for semantic meaning
+        text = " ".join(
+            piece for piece in (email.get("subject"), email.get("content")) if piece
+        )
+        vector = model.encode(text, normalize_embeddings=True).tolist()
         rows.append(
             (
-                em["id"],
-                em.get("conversation_id"),
-                em.get("subject"),
-                em.get("from"),
-                # convert RFC-2822 date to timestamptz when possible
-                parse_ts(em.get("date")),
-                em.get("order"),
-                em.get("content"),
-                Json(em),  # raw jsonb
-                emb,
+                email["id"],
+                email.get("conversation_id"),
+                email.get("subject"),
+                email.get("from"),                 # sender address
+                parse_date(email.get("date")),
+                email.get("order"),
+                email.get("content"),
+                Json(email),                       # raw jsonb payload
+                vector,
             )
         )
     return rows
 
-
-def parse_ts(date_str: str | None):
-    from email.utils import parsedate_to_datetime
-
-    if not date_str:
-        return None
-    try:
-        return parsedate_to_datetime(date_str)
-    except Exception:
-        return None
-
-
-# ─── main ──────────────────────────────────────────────────────────────────────
+# ─── main pipeline ───────────────────────────────────────────────────────────
 def main():
-    conversations = load_json()
-    flat_emails   = flatten(conversations)
+    # load preprocessed json
+    conversations = load_json(JSON_FILE)
+    all_emails = flatten_conversations(conversations)
 
-    model = SentenceTransformer(MODEL_NAME)
-    conn  = open_db()
+    # load bge-m3 onnx model once
+    model = SentenceTransformer(MODEL_NAME, trust_remote_code=True)
+
+    # connect to postgres
+    conn = open_connection()
     ensure_schema(conn, model.get_sentence_embedding_dimension())
 
-    existing = fetch_existing_ids(conn)
-    fresh    = [e for e in flat_emails if e["id"] not in existing]
-
-    if not fresh:
-        print("[INFO] database already up-to-date.")
+    # filter out ids we already stored
+    existing_ids = fetch_existing_ids(conn)
+    new_emails = [e for e in all_emails if e["id"] not in existing_ids]
+    if not new_emails:
+        print("database already up-to-date")
         return
 
-    print(f"[INFO] embedding & inserting {len(fresh)} new emails …")
-    rows = rows_for_upsert(model, fresh)
+    print(f"embedding and storing {len(new_emails)} new emails")
+    batch = prepare_rows(model, new_emails)
 
+    # bulk insert using execute_values for speed
     with conn, conn.cursor() as cur:
-        execute_values(cur, UPSERT_SQL, rows, page_size=500)
+        execute_values(cur, UPSERT_SQL, batch, page_size=500)
 
-    print("[DONE] all new emails stored and indexed.")
-
+    print("done – new emails saved with embeddings")
 
 if __name__ == "__main__":
     main()

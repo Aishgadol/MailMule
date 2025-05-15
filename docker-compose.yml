@@ -1,13 +1,12 @@
-version: "3.9"
 services:
   db:
-    image: ankane/pgvector:latest       # Postgres 16 + pgvector pre-built
+    image: ankane/pgvector:latest      # Postgres 16 plus pgvector built-in
     container_name: mailmule_pg
     environment:
       POSTGRES_USER: mailmule
       POSTGRES_PASSWORD: mailmule
       POSTGRES_DB: mailmule
     volumes:
-      - ./pgdata:/var/lib/postgresql/data  # keeps data on disk
+      - ./pgdata:/var/lib/postgresql/data   # keeps data even if the container stops
     ports:
       - "5432:5432"
