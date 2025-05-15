@@ -21,8 +21,8 @@ DB_CONFIG = {
     "host":     os.getenv("PGHOST", "localhost"),
     "port":     os.getenv("PGPORT", "5432"),
     "user":     os.getenv("PGUSER", "mailmule"),
-    "password": os.getenv("PGPASSWORD", "mailmule"),
-    "dbname":   os.getenv("PGDATABASE", "mailmule"),
+    "password": os.getenv("PGPASSWORD", "159753"),
+    "dbname":   os.getenv("PGDATABASE", "mailmule_db"),
 }
 INPUT_PATH = Path(
     sys.argv[1] if len(sys.argv) > 1 else
@@ -32,7 +32,7 @@ EMBED_MODEL_NAME = "BAAI/bge-m3"
 
 # ─── create table with pgvector column ────────────────────────────────────────
 DDL_SQL = """
-create extension if not exists pgvector;
+create extension if not exists vector;
 create table if not exists emails (
     id              text primary key,
     conversation_id text,
