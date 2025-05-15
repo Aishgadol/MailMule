@@ -1,12 +1,13 @@
 services:
   db:
-    image: ankane/pgvector:latest      # Postgres 16 plus pgvector built-in
+    image: ankane/pgvector:latest
     container_name: mailmule_pg
+    ports:
+      - "5432:5432"                # expose the Postgres port on your host
     environment:
       POSTGRES_USER: mailmule
       POSTGRES_PASSWORD: mailmule
       POSTGRES_DB: mailmule
+      POSTGRES_HOST_AUTH_METHOD: trust   # dev mode: allows any IP to connect
     volumes:
-      - ./pgdata:/var/lib/postgresql/data   # keeps data even if the container stops
-    ports:
-      - "5432:5432"
+      - ./pgdata:/var/lib/postgresql/data
