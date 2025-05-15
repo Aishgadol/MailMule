@@ -2,13 +2,13 @@
 # mailmule_store.py – unified pgvector email/conversation loader
 #
 # Public API
-#  ├─ create_all(json_path, email_db_cfg, conv_db_cfg, …)
-#  ├─ update_all(json_path, email_db_cfg, conv_db_cfg, …)
-#  └─ create_or_update(json_path, email_db_cfg, conv_db_cfg, …)
+#  * create_all(json_path, email_db_cfg, conv_db_cfg, …)
+#  * update_all(json_path, email_db_cfg, conv_db_cfg, …)
+#  * create_or_update(json_path, email_db_cfg, conv_db_cfg, …)
 #
-# Each returns (emails_written:int, conversations_written:int).
+# each returns (emails_written:int, conversations_written:int).
 #
-# Running this file directly chooses create_or_update() automatically.
+# running this file directly chooses create_or_update() automatically.
 
 from __future__ import annotations
 
@@ -181,9 +181,15 @@ def build_rows(
         - email_rows  (list of tuples suitable for execute_values)
         - conv_vectors {conversation_id: [embedding, …]}
     """
-    texts = [
-        " ".join(filter(None, (em.get("subject"), em.get("content")))) for em in emails
-    ]
+    texts = []
+    for em in emails:
+        prompt = (
+            f"You are an AI tasked with turning this email into a context-based vector, represent it for searching relevant documents and retrieval.\n "
+            f"{em.get("from") if em.get("from") else "unknown sender"}.\n"
+            f"{em.get("subject") if em.get("subject") else "No Title"}.\n"
+            f"{em.get("content") if em.get("content") else "no content"}.\n"
+        )
+        texts.append(prompt)
     vectors = encode_batches(model, texts, batch_size)
 
     email_rows: List[tuple] = []
