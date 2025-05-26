@@ -6,6 +6,7 @@ faiss: in-memory index for fast search.
 postgres: stores email metadata.
 query: compute query embedding, then fetch similar emails.
 """
+#last touched on 2024-01-15
 
 import json
 import numpy as np

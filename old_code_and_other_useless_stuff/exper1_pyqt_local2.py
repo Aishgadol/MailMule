@@ -74,7 +74,7 @@ class GmailApp(QtWidgets.QMainWindow):
                 if self.creds and self.creds.expired and self.creds.refresh_token:
                     self.creds.refresh(Request())
                 else:
-                    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                    flow = InstalledAppFlow.from_client_secrets_file('../credentials.json', SCOPES)
                     self.creds = flow.run_local_server(port=0)
                 # Save the credentials for future use
                 with open('token.pickle', 'wb') as token:
