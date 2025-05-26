@@ -190,6 +190,7 @@ def build_rows(
             f"{em.get("content") if em.get("content") else "no content"}.\n"
         )
         texts.append(prompt)
+    print (len(texts),"\n", texts[:5])  # Debug: print first 5 prompts
     vectors = encode_batches(model, texts, batch_size)
 
     email_rows: List[tuple] = []
