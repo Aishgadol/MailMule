@@ -1,10 +1,16 @@
-#!/usr/bin/env python3
+
+
+
+
 """
 Script to generate mock preprocessed emails in the same format as
 `preprocessed_emails.json`, using an LLM to create
 short (6–9 sentences) context-rich email threads across our topics.
 Ensures consistent participants, dates, and context.
 """
+
+
+
 import argparse
 import json
 import logging
