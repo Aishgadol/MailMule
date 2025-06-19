@@ -91,7 +91,7 @@ def main() -> None:
     )
     parser.add_argument(
         "-m", "--model-name",
-        default="mistralai/Mistral-3B-Instruct-v0.1",
+        default="ministral/Ministral-3b-instruct",
         help="HuggingFace model identifier"
     )
     parser.add_argument(
