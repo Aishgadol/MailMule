@@ -13,6 +13,7 @@ Ensures consistent participants, dates, and context.
 
 import argparse
 import json
+import ast
 import logging
 import os
 import random
@@ -24,6 +25,32 @@ from typing import Any, Dict, List
 
 from faker import Faker
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+
+def parse_jsonish(text: str):
+    """Attempt to parse text that should contain JSON."""
+    cleaned = text.strip()
+    # remove Markdown-style fences
+    cleaned = re.sub(r'^```(?:json)?\n|\n```$', '', cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    m = re.search(r'(\[.*\])', cleaned, flags=re.DOTALL)
+    if m:
+        block = m.group(1)
+        try:
+            return json.loads(block)
+        except json.JSONDecodeError:
+            try:
+                return ast.literal_eval(block)
+            except Exception:
+                pass
+    # fallback: try replacing single quotes
+    try:
+        return json.loads(cleaned.replace("'", '"'))
+    except Exception:
+        raise
 
 
 def random_date(start: datetime, end: datetime) -> datetime:
@@ -64,18 +91,11 @@ def generate_thread(
         try:
             out = generator(prompt, max_new_tokens=512, temperature=0.7)
             text = out[0].get("generated_text", "")
-            return json.loads(text)
-        except json.JSONDecodeError:
-            logging.warning("JSON parse failed (attempt %d), extracting block…", attempt)
-            m = re.search(r"(\[.*\])", text, flags=re.DOTALL)
-            if m:
-                try:
-                    return json.loads(m.group(1))
-                except json.JSONDecodeError:
-                    logging.warning("Retry %d: still invalid JSON.", attempt)
+            return parse_jsonish(text)
         except Exception as e:
-            logging.error("Generation error on attempt %d: %s", attempt, e)
-
+            logging.warning("JSON parse failed (attempt %d), retrying…", attempt)
+            logging.debug("Raw LLM output: %s", text)
+            logging.debug("Error: %s", e)
         if attempt < max_retries:
             time.sleep(retry_delay)
 
