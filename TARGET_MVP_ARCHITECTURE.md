@@ -12,8 +12,7 @@ flowchart TD
     end
 
     subgraph API
-        E["app.py (FastAPI)"] --> F[(FAISS index)]
-        F <-- E
+        E["app.py (FastAPI)"] <--> F[(FAISS index)]
     end
 
     G[Browser UI] -->|/search| E
