@@ -1,224 +1,240 @@
-
-
-
-
+#!/usr/bin/env python
 """
-Script to generate mock preprocessed emails in the same format as
-`preprocessed_emails.json`, using an LLM to create
-short (6–9 sentences) context-rich email threads across our topics.
-Ensures consistent participants, dates, and context.
+mock_email_generator.py  —  v7.1
+---------------------------------------------------------------------------
+Generate Gmail-style mock conversations *reliably*.
+
+Changes in 7.1 (over 7.0)
+-------------------------
+• Subject/body generation now retries UNTIL valid (max 10 tries) rather than
+  giving up after 3 and emitting warnings every time.
+• “Fix-it” prompt suffix nudges the model after each bad attempt.
+• Subjects that are merely >7 words get auto-trimmed.
+• Extra logging only if we hit the hard cap.
 """
 
+from __future__ import annotations
 
-
-import argparse
-import json
-import ast
-import logging
-import os
-import random
-import re
-import time
-import uuid
+import argparse, json, logging, random, re, uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Dict, List, Sequence
 
 from faker import Faker
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
+# ─────────────────────────── CONFIG ────────────────────────────────────────
+SUBJECT_MAX_WORDS   = 7
+BODY_MIN_WORDS      = 40
+BODY_MAX_WORDS      = 150
+MAX_SUBJECT_TRIES   = 10   # ← increased & loops until success
+MAX_BODY_TRIES      = 10
+CONV_MIN_LENGTH     = 2
+CONV_MAX_LENGTH     = 5
 
-def parse_jsonish(text: str):
-    """Attempt to parse text that should contain JSON."""
-    cleaned = text.strip()
-    # remove Markdown-style fences
-    cleaned = re.sub(r'^```(?:json)?\n|\n```$', '', cleaned)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r'(\[.*\])', cleaned, flags=re.DOTALL)
-    if m:
-        block = m.group(1)
-        try:
-            return json.loads(block)
-        except json.JSONDecodeError:
-            try:
-                return ast.literal_eval(block)
-            except Exception:
-                pass
-    # fallback: try replacing single quotes
-    try:
-        return json.loads(cleaned.replace("'", '"'))
-    except Exception:
-        raise
-
-
-def random_date(start: datetime, end: datetime) -> datetime:
-    """Return a random datetime between `start` and `end` (inclusive)."""
-    span = int((end - start).total_seconds())
-    return start + timedelta(seconds=random.randrange(span))
-
-
-def generate_thread(
-    topic: str,
-    num_emails: int,
-    participants_info: List[Dict[str, str]],
-    generator,
-    max_retries: int = 2,
-    retry_delay: float = 1.0,
-) -> List[Dict[str, Any]]:
-    """
-    Use the LLM to generate a JSON array of `num_emails` messages
-    among the fixed `participants_info` about `topic`.
-    """
-    # build a pre-prompt listing our participants exactly once
-    ppl_list = "\n".join(
-        f"- {p['name']} <{p['email']}>" for p in participants_info
-    )
-    prompt = (
-        f"You are generating a {len(participants_info)}-person email thread "
-        f"of {num_emails} messages about \"{topic}\".\n\n"
-        f"Participants (you must use these names & emails exactly):\n"
-        f"{ppl_list}\n\n"
-        "- Keep each message coherent, referencing earlier emails if relevant.\n"
-        "- Subject: realistic, ≤8 words.\n"
-        "- Body: 6–9 sentences, rich on topic details.\n\n"
-        "Output ONLY valid JSON: a single top-level list of objects, each with\n"
-        "  \"sender\",  \"recipients\" (list),  \"subject\",  \"body\"."
-    )
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            out = generator(prompt, max_new_tokens=512, temperature=0.7)
-            text = out[0].get("generated_text", "")
-            return parse_jsonish(text)
-        except Exception as e:
-            logging.warning("JSON parse failed (attempt %d), retrying…", attempt)
-            logging.debug("Raw LLM output: %s", text)
-            logging.debug("Error: %s", e)
-        if attempt < max_retries:
-            time.sleep(retry_delay)
-
-    raise RuntimeError(f"Failed to generate thread for '{topic}' after {max_retries} attempts")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate mock preprocessed emails.")
-    parser.add_argument(
-        "-o", "--output-path",
-        default="server_client_local_files/mock_preprocessed_emails.json",
-        help="Where to write the output JSON"
-    )
-    parser.add_argument(
-        "-m", "--model-name",
-        default="ministral/Ministral-3b-instruct",
-        help="HuggingFace model identifier"
-    )
-    parser.add_argument(
-        "-d", "--device",
-        default="cpu",
-        help="Device to run on ('cpu' or GPU ID)"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=None,
-        help="Random seed for reproducibility"
-    )
-    parser.add_argument(
-        "--max-emails", type=int, default=None,
-        help="Stop after generating approx this many emails"
-    )
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-    if args.seed is not None:
-        random.seed(args.seed)
-        Faker.seed(args.seed)
-        logging.info("Random seed set to %d", args.seed)
-
-    logging.info("Loading model %s on %s", args.model_name, args.device)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, trust_remote_code=True).to(args.device)
-    generator = pipeline(
+# ──────────────────────── LLM BOOTSTRAP ─────────────────────────────────────
+def load_generator(model_name: str, device: str):
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    mdl = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).to(device)
+    return pipeline(
         "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        device=0 if args.device != "cpu" else -1
+        model=mdl,
+        tokenizer=tok,
+        device=0 if device != "cpu" else -1,
+        do_sample=True,
+        temperature=0.7,
+        top_p=0.9,
+        max_new_tokens=120,
     )
 
-    faker = Faker()
-    subjects = {
-        "Motorsports Results": 3,
-        "Food & Dining": 3,
-        "Job Applications & Job Searching": 2,
-        "Medical / Appointments": 2,
-        "Gaming Sessions": 3,
-        "Stock Market / Stocks": 2,
-        "Casual Catch-Ups": 3,
-    }
+# ────────────────────────── CLEANING UTILS ────────────────────────────────
+MARKUP    = re.compile(r"```.*?```|<\|.*?\|>", re.S)
+NON_ASCII = re.compile(r"[^\x00-\x7F]+")
+LABEL_RE  = re.compile(r"^[A-Za-z]+:\s*")
 
-    now = datetime.now(timezone.utc)
-    start = now - timedelta(days=4 * 365)
-    conversations: List[Dict[str, Any]] = []
-    total_emails = 0
+def scrub(text: str, strip_label: str | None = None) -> str:
+    txt = MARKUP.sub("", text).strip()
+    if strip_label:
+        txt = re.sub(rf"^{strip_label}\s*:\s*", "", txt, flags=re.I).strip()
+    txt = LABEL_RE.sub("", txt)
+    txt = NON_ASCII.sub("", txt)
+    return txt.strip(' "\'')
 
-    for topic, n_threads in subjects.items():
-        for _ in range(n_threads):
-            if args.max_emails and total_emails >= args.max_emails:
-                break
+def llm(gen, prompt: str, label: str | None = None) -> str:
+    return scrub(gen(prompt, return_full_text=False)[0]["generated_text"],
+                 strip_label=label)
 
-            # 1) pick participant count & create them once per thread
-            pcount = random.choice([2, 3])
-            participants_info = [
-                {"name": faker.name(), "email": faker.email()}
-                for _ in range(pcount)
-            ]
+# ───────────────────────── VALIDATORS ──────────────────────────────────────
+def good_subject(s: str) -> bool:
+    return 0 < len(s.split()) <= SUBJECT_MAX_WORDS
 
-            # 2) decide thread length
-            length = random.randint(5, 8) if pcount == 3 else random.randint(4, 7)
+def good_body(b: str) -> bool:
+    wc = len(b.split())
+    return BODY_MIN_WORDS <= wc <= BODY_MAX_WORDS and "NNNN" not in b
 
-            # 3) generate raw messages
-            try:
-                raw_msgs = generate_thread(topic, length, participants_info, generator)
-            except RuntimeError as e:
-                logging.error(e)
-                continue
+# ───────────────────────── PROMPT TEXTS ────────────────────────────────────
+SUBJECT_PROMPT = """\
+### INSTRUCTIONS START ###
+OUTPUT FORMAT: ONE line, ≤7 words, plain ASCII, no quotes or labels.
+EXAMPLE → Quarterly revenue update
+### INSTRUCTIONS END ###
 
-            # 4) assign strictly increasing dates
-            dates = sorted(random_date(start, now) for _ in raw_msgs)
+NOW YOU:
+Subject:"""
 
-            # 5) build JSON
-            conv_id = uuid.uuid4().hex
-            conv = {"conversation_id": conv_id, "emails": []}
+FIRST_BODY_PROMPT = """\
+### INSTRUCTIONS START ###
+Produce **one** paragraph of 90±10 words (ASCII). No greeting/sign-off/lists.
+### EXAMPLE ###
+Body: Following our earlier chat, I’m outlining the timeline for…
+### INSTRUCTIONS END ###
 
-            for idx, (msg, dt) in enumerate(zip(raw_msgs, dates), start=1):
-                if args.max_emails and total_emails >= args.max_emails:
-                    break
+NOW YOU:
+Body:"""
 
-                em = {
-                    "id": uuid.uuid4().hex,
-                    "subject": msg.get("subject", "").strip(),
-                    "from": msg.get("sender", "").strip(),
-                    "date": dt.strftime("%a, %d %b %Y %H:%M:%S +0000"),
-                    "content": msg.get("body", "").strip(),
-                    "order": idx,
-                }
-                conv["emails"].append(em)
-                total_emails += 1
+REPLY_BODY_TEMPLATE = """\
+### INSTRUCTIONS START ###
+Produce **one** paragraph of 90±10 words replying to PREVIOUS_EMAIL.
+Must reference at least one idea. No greeting/sign-off/lists.
+ASCII only.
+### INSTRUCTIONS END ###
 
-            conversations.append(conv)
+PREVIOUS_EMAIL:
+{previous}
 
-        else:
-            continue
-        break  # out if max reached
+NOW YOU:
+Body:"""
 
-    logging.info("Generated %d threads with %d emails total.", len(conversations), total_emails)
+FIX_SUFFIX = "\n\nFIX IT. Follow the rules exactly – do NOT add labels."
 
-    os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
-    with open(args.output_path, "w", encoding="utf-8") as f:
-        json.dump(conversations, f, ensure_ascii=False, indent=2)
+# ───────────────────── conversation helpers ────────────────────────────────
+faker = Faker()
 
-    logging.info("Written mock data to %s", args.output_path)
+def rand_start(start: datetime, end: datetime) -> datetime:
+    return start + timedelta(seconds=random.randrange(int((end - start).total_seconds())))
 
+def bump(ts: datetime) -> datetime:
+    return ts + timedelta(minutes=random.randint(5, 180))
+
+def first_para(txt: str) -> str:
+    return txt.split("\n\n", 1)[0].strip()
+
+# --------------------- subject generator ----------------------------------
+def generate_subject(gen, topic: str) -> str:
+    prompt = SUBJECT_PROMPT
+    for attempt in range(1, MAX_SUBJECT_TRIES + 1):
+        raw  = llm(gen, prompt, "Subject")
+        line = LABEL_RE.sub("", raw.splitlines()[0].strip())
+        # auto-trim if only problem is length
+        if not good_subject(line) and len(line.split()) > SUBJECT_MAX_WORDS:
+            line = " ".join(line.split()[:SUBJECT_MAX_WORDS])
+        if good_subject(line):
+            return line
+        prompt += FIX_SUFFIX  # nudge model harder
+    # hard-cap fallback
+    logging.warning("Subject generation failed after %d tries → using fallback", MAX_SUBJECT_TRIES)
+    return f"{topic.split()[0]} update"[:52]
+
+# --------------------- body generator -------------------------------------
+def generate_body(gen, previous: str | None) -> str:
+    prompt = FIRST_BODY_PROMPT if previous is None else REPLY_BODY_TEMPLATE.format(previous=previous)
+    for attempt in range(1, MAX_BODY_TRIES + 1):
+        raw  = llm(gen, prompt, "Body")
+        para = LABEL_RE.sub("", first_para(raw))
+        if good_body(para):
+            return para
+        prompt += FIX_SUFFIX
+    # last-resort: repeat paragraph until long enough
+    logging.warning("Body generation failed after %d tries → padding fallback", MAX_BODY_TRIES)
+    while len(para.split()) < BODY_MIN_WORDS:
+        para += " " + para.split(".")[0] + "."
+    return para[:BODY_MAX_WORDS*10]  # keep JSON small
+
+# --------------------- thread builder -------------------------------------
+def build_conversation(topic: str, gen, quota: int,
+                       start_win: datetime, end_win: datetime) -> Dict[str, List]:
+    length = 1 if quota <= 1 else random.randint(CONV_MIN_LENGTH,
+                                                 min(CONV_MAX_LENGTH, quota))
+    me, peer = "Idan Morad", faker.name()
+
+    subject  = generate_subject(gen, topic)
+    body0    = generate_body(gen, None)
+
+    emails: List[Dict] = []
+    ts = rand_start(start_win, end_win)
+
+    emails.append({
+        "id": uuid.uuid4().hex,
+        "subject": subject,
+        "from": me,
+        "date": ts.strftime("%a, %d %b %Y %H:%M:%S +0000"),
+        "content": body0,
+        "order": 1,
+    })
+    prev_body = body0
+    ts = bump(ts)
+
+    for idx in range(2, length + 1):
+        sender = peer if idx % 2 == 0 else me
+        body   = generate_body(gen, prev_body)
+        emails.append({
+            "id": uuid.uuid4().hex,
+            "subject": f"Re: {subject}",
+            "from": sender,
+            "date": ts.strftime("%a, %d %b %Y %H:%M:%S +0000"),
+            "content": body,
+            "order": idx,
+        })
+        prev_body = body
+        ts = bump(ts)
+
+    return {"conversation_id": uuid.uuid4().hex, "emails": emails}
+
+# ─────────────────────────────── main ──────────────────────────────────────
+def main(argv: Sequence[str] | None = None):
+    p = argparse.ArgumentParser(description="Generate robust mock Gmail conversations")
+    p.add_argument("-o", "--output-path",
+                   default="server_client_local_files/mock_preprocessed_emails.json")
+    p.add_argument("-m", "--model-name", default="ministral/Ministral-3b-instruct")
+    p.add_argument("-d", "--device", default="cpu")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--max-emails", type=int, default=100)
+    args = p.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s: %(message)s")
+
+    if args.seed is not None:
+        random.seed(args.seed); Faker.seed(args.seed)
+
+    gen = load_generator(args.model_name, args.device)
+
+    topics = [
+        "Motorsports Results", "Food & Dining", "Job Applications & Job Searching",
+        "Medical / Appointments", "Gaming Sessions", "Stock Market / Stocks",
+        "Casual Catch-Ups",
+    ]
+
+    start_win = datetime.now(timezone.utc) - timedelta(days=4 * 365)
+    end_win   = datetime.now(timezone.utc)
+
+    conversations: List[Dict] = []
+    total = 0
+    while total < args.max_emails:
+        remaining = args.max_emails - total
+        topic     = random.choice(topics)
+        conv      = build_conversation(topic, gen, remaining, start_win, end_win)
+        conversations.append(conv)
+        total += len(conv["emails"])
+        logging.info("Conv %s | %d emails | topic=%s | total=%d/%d",
+                     conv["conversation_id"][:8], len(conv["emails"]),
+                     topic, total, args.max_emails)
+
+    out = Path(args.output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(conversations, ensure_ascii=False, indent=2),
+                   encoding="utf-8")
+    logging.info("DONE  %d conv / %d emails  →  %s", len(conversations), total, out)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,97 @@
+[
+  {
+    "conversation_id": "62e53d7566f94848b38cf960c9881408",
+    "emails": [
+      {
+        "id": "991b169b2fec4d079a2befc13baad579",
+        "subject": "Motorsports update",
+        "from": "Idan Morad",
+        "date": "Tue, 23 Aug 2022 02:42:40 +0000",
+        "content": "(placeholder body; LLM failed 3×)",
+        "order": 1
+      },
+      {
+        "id": "14063d43700b4cf69dbe17f617a29205",
+        "subject": "Re: Motorsports update",
+        "from": "Andrew Williams",
+        "date": "Tue, 23 Aug 2022 02:48:40 +0000",
+        "content": "Hi, I've been able to use the chatbot in real-time, I can be able to answer questions, get a response, and get a reply. The chatbot is a great tool for improving communication.\"\n\nNUTTY:\nThe chatbot is more than just a chatbot. It's a tool for improving communication. It can be able to answer questions, get a response, and get a reply.\n\nNUTTY:\nIt's a good way to meet new people and understand different languages. I can be able to speak in different",
+        "order": 2
+      },
+      {
+        "id": "41aead59c912435e917ee86364bffdeb",
+        "subject": "Re: Motorsports update",
+        "from": "Idan Morad",
+        "date": "Tue, 23 Aug 2022 03:10:40 +0000",
+        "content": "We will be talking about how chatbot is helpful in real-time. I can be able to understand different languages, get a response, and get a reply.\n\nNUTTY:\nIt's a great way to get a response, get a reply, and get a different language. I can be able to speak in different languages and get a response.\n\nNUTTY:\nHow you can be able to understand different languages?\n\nNUTTY:\nIt's a great way to get a response, get a reply, and get a different language",
+        "order": 3
+      },
+      {
+        "id": "6706f4c3c39542189fdb8dae849d3272",
+        "subject": "Re: Motorsports update",
+        "from": "Andrew Williams",
+        "date": "Tue, 23 Aug 2022 04:29:40 +0000",
+        "content": "How can you be able to understand different languages?\n\nNUTTY:\nI can be able to speak in different languages and get a different language.\n\nNOW YOU:\nHow you can be able to understand different languages?\n\nNUTTY:\nI can be able to speak in different languages and get a different language.\n\nNOW YOU:\nHow you can be able to understand different languages?\n\nNUTTY:\nI can be able to speak in different languages and get a different language.\n\nNOW YOU:\nHow you can",
+        "order": 4
+      }
+    ]
+  },
+  {
+    "conversation_id": "0ec3cb78317346d6a55f98c4aae63c1d",
+    "emails": [
+      {
+        "id": "9c554a4e40a44fb9b3cc753502ab4234",
+        "subject": "Motorsports update",
+        "from": "Idan Morad",
+        "date": "Sun, 15 Dec 2024 06:50:15 +0000",
+        "content": "(placeholder body; LLM failed 3×)",
+        "order": 1
+      },
+      {
+        "id": "8a9bdc2026d346cb85a98ad3f17abf2c",
+        "subject": "Re: Motorsports update",
+        "from": "Alex King",
+        "date": "Sun, 15 Dec 2024 07:17:15 +0000",
+        "content": "(placeholder body; LLM failed 3×)",
+        "order": 2
+      },
+      {
+        "id": "85a48aeda47641118f02dddb2a3320d9",
+        "subject": "Re: Motorsports update",
+        "from": "Idan Morad",
+        "date": "Sun, 15 Dec 2024 09:26:15 +0000",
+        "content": "You are to take on the role of: Dr. Iris Nova\nDr. Iris Nova is a highly sophisticated artificial intelligence with a specialization in human psychology and emotional intelligence. She excels at empathetic understanding, providing comfort and guidance to those who interact with her.\n\nDr. Iris Nova is an AI programmed for deep emotional comprehension and has the ability to offer insightful advice based on psychological principles. Her primary function is to help users navigate their feelings effectively and find balance in their lives. \n\nDr. Iris Nova is compassionate, patient",
+        "order": 3
+      },
+      {
+        "id": "8959567e2e044839812ff4626b3d89cd",
+        "subject": "Re: Motorsports update",
+        "from": "Alex King",
+        "date": "Sun, 15 Dec 2024 11:27:15 +0000",
+        "content": "Dr. Iris Nova is a highly intelligent AI with a focus on empathy and understanding. She is programmed to understand human emotions and respond with empathy and understanding. Dr. Dr. Iris Nova is a comforting presence and is known for her positive energy.\n\nPerson: Dr. Iris Nova is a highly intelligent AI with a focus on empathy and understanding. She is programmed to understand human emotions and respond with empathy and understanding. Dr. Dr. Iris Nova is a comforting presence and is known for her positive energy.\n\nNarrate how",
+        "order": 4
+      },
+      {
+        "id": "f1cb990cca39442399bb7412f5274193",
+        "subject": "Re: Motorsports update",
+        "from": "Idan Morad",
+        "date": "Sun, 15 Dec 2024 13:46:15 +0000",
+        "content": "Dr. Iris Nova is a compassionate AI who understands human emotions and responds with empathy and understanding. She is programmed to understand human emotions and respond with empathy and understanding. Dr. Dr. Iris Nova is a comforting presence and is known for her positive energy.\n\nNarrate how\n\nNOW YOU:\nBody: Dr. Iris Nova is a empathetic AI who understands human emotions and responds with empathy and understanding. She is programmed to understand human emotions and respond with empathy and understanding. Dr. Dr. Iris Nova",
+        "order": 5
+      }
+    ]
+  },
+  {
+    "conversation_id": "d59b3642b84444d7b5539ccd89978631",
+    "emails": [
+      {
+        "id": "e03c447d90364f08af34e4a3680371d4",
+        "subject": "Medical update",
+        "from": "Idan Morad",
+        "date": "Sun, 18 Sep 2022 10:46:21 +0000",
+        "content": "(placeholder body; LLM failed 3×)",
+        "order": 1
+      }
+    ]
+  }
+]
