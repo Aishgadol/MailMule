@@ -3,6 +3,8 @@ import tkinter as tk
 from tkinter import messagebox
 from server import handle_request  # your server script
 
+PLACEHOLDER = "Tell me what type of emails you're looking for..."
+
 class App:
     def __init__(self):
         self.root = tk.Tk()
@@ -24,11 +26,26 @@ class App:
 
     def _clear_search_screen(self):
         """Remove query text and any search results/attributes."""
-        self.query_entry.delete(0, "end")
+        self._reset_query_field()
         for w in self.attr_frame.winfo_children():
             w.destroy()
         for w in self.res_frame.winfo_children():
             w.destroy()
+
+    def _reset_query_field(self):
+        self.query_entry.delete(0, "end")
+        self.query_entry.insert(0, PLACEHOLDER)
+        self.query_entry.config(fg="grey")
+
+    def _on_query_focus(self, event=None):
+        if self.query_entry.get() == PLACEHOLDER:
+            self.query_entry.delete(0, "end")
+            self.query_entry.config(fg="black")
+
+    def _on_query_focus_out(self, event=None):
+        if not self.query_entry.get():
+            self.query_entry.insert(0, PLACEHOLDER)
+            self.query_entry.config(fg="grey")
 
     def _build_login_screen(self):
         self.login_frame = tk.Frame(self.root)
@@ -76,9 +93,14 @@ class App:
 
         # top bar: back, query, search
         top = tk.Frame(self.search_frame)
-        tk.Button(top, text="< Back", command=self._on_back).pack(side="left", padx=5)
+        self.back_btn = tk.Button(top, text="< Back", command=self._on_back)
+        self.back_btn.pack(side="left", padx=5)
+
         self.query_entry = tk.Entry(top)
-        self.query_entry.pack(side="left", fill="x", expand=True, padx=5)
+        self.query_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=5)
+        self.query_entry.bind("<FocusIn>", self._on_query_focus)
+        self.query_entry.bind("<FocusOut>", self._on_query_focus_out)
+        self._reset_query_field()
         self.search_btn = tk.Button(
             top,
             text="Search",
@@ -100,7 +122,7 @@ class App:
         tk.Label(attr_container, text="Attributes", font=("Arial", 12, "bold")).pack(anchor="nw", pady=5)
         self._attr_canvas = tk.Canvas(attr_container, width=300)
         self._attr_canvas.pack(side="left", fill="y", expand=True)
-        attr_scroll = tk.Scrollbar(attr_container, orient="vertical", command=self._attr_canvas.yview)
+        attr_scroll = tk.Scrollbar(attr_container, orient="vertical", command=self._attr_canvas.yview, width=20)
         attr_scroll.pack(side="right", fill="y")
         self._attr_canvas.configure(yscrollcommand=attr_scroll.set)
         self.attr_frame = tk.Frame(self._attr_canvas)
@@ -113,7 +135,7 @@ class App:
         tk.Label(res_container, text="Results", font=("Arial", 12, "bold")).pack(anchor="nw", pady=5)
         self._res_canvas = tk.Canvas(res_container)
         self._res_canvas.pack(side="left", fill="both", expand=True)
-        res_scroll = tk.Scrollbar(res_container, orient="vertical", command=self._res_canvas.yview)
+        res_scroll = tk.Scrollbar(res_container, orient="vertical", command=self._res_canvas.yview, width=20)
         res_scroll.pack(side="right", fill="y")
         self._res_canvas.configure(yscrollcommand=res_scroll.set)
         self.res_frame = tk.Frame(self._res_canvas)
@@ -175,9 +197,10 @@ class App:
         if not q:
             return
         self.search_btn.config(state="disabled")
+        self.back_btn.config(state="disabled")
         messagebox.showinfo("Search", "Starting the search, this might take some time.")
         try:
-            resp = handle_request({"type": "inputFromUI", "query": q, "k": 5})
+            resp = handle_request({"type": "inputFromUI", "query": q, "k": 8})
             results = resp.get("results", [])
         except Exception as e:
             print("Error during handle_request:", e)
@@ -232,14 +255,14 @@ class App:
                 lbl.pack(fill="x")
 
                 if len(content) > 200:
-                    def make_toggle(v=var, full=content):
+                    def make_toggle(v=var, full=content, snip=snippet):
                         def toggle():
-                            if v.get() == snippet:
+                            if v.get() == snip:
                                 print("Read more clicked: expanding content")
                                 v.set(full)
                             else:
                                 print("Read more clicked: collapsing content")
-                                v.set(snippet)
+                                v.set(snip)
                         return toggle
 
                     btn = tk.Button(card, text="Read more", command=make_toggle())
@@ -248,6 +271,8 @@ class App:
                 card.pack(fill="x", padx=5, pady=5)
 
         self.search_btn.config(state="normal")
+        self.back_btn.config(state="normal")
+        self._reset_query_field()
 
     def run(self):
         self.root.mainloop()

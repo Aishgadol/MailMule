@@ -31,9 +31,8 @@ BATCH_SIZE  = 64
 
 INSTRUCT_MODEL = "ministral/Ministral-3b-instruct"
 SYSTEM_PROMPT  = (
-    "You need to turn this text into a topic-based ready-to-embed text that will "
-    "be used for semantic lookup against a database of emails discussing various "
-    "topic. be concise, to the point, focused, short."
+    "You are a professional email writer with expertise in extracting subjects from texts. "
+    "Turn this text into topic-based semantic-lookup-ready form."
 )
 
 # ─────────────────────────── Logging Setup ──────────────────────────────
@@ -51,6 +50,16 @@ _ids     = []     # list of email IDs in index order
 # pre-load models once
 _embedder   = SentenceTransformer(EMBED_MODEL)
 _structurer = hf_pipeline("text-generation", model=INSTRUCT_MODEL)
+
+def build_chat_prompt(messages, tokenizer):
+    use_chat = hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None
+    if use_chat:
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompt = ""
+    for m in messages:
+        prompt += f"<s>{m['role']}\n{m['content']}</s>\n"
+    prompt += "<s>assistant\n"
+    return prompt
 
 # ──────────────────────────── Helpers ──────────────────────────────────
 def _build_index():
@@ -147,13 +156,19 @@ def handle_request(request: dict) -> dict:
     # ─── inputFromUI ────────────────────────────────────────────────────────
     if req_type == "inputFromUI":
         q = (request.get("query") or "").strip()
-        k = int(request.get("k", 5))
+        k = int(request.get("k", 8))
         if not q:
             log.warning("Empty query received")
             return {"error": "Empty query"}
 
         log.info("Structuring query with Ministral-3B…")
-        prompt = f"{SYSTEM_PROMPT}\n\n{q}"
+        tokenizer = _structurer.tokenizer
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"I said \n\"{q}\"\n"},
+            {"role": "user", "content": "Write a follow-up to the previous email. Make sure to discuss about the topics in the previous email"},
+        ]
+        prompt = build_chat_prompt(messages, tokenizer)
         log.info("LLM prompt → %s", prompt)
         try:
             structured = _structurer(
