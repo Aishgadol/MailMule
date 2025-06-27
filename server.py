@@ -31,7 +31,7 @@ BATCH_SIZE  = 64
 
 INSTRUCT_MODEL = "ministral/Ministral-3b-instruct"
 SYSTEM_PROMPT  = (
-    "You are a professional email writer with expertise in extracting subjects from texts. "
+    "You are a professional topic and subject extractor with expertise in writing emails. "
     "Turn this text into topic-based semantic-lookup-ready form."
 )
 
@@ -58,7 +58,7 @@ def build_chat_prompt(messages, tokenizer):
     prompt = ""
     for m in messages:
         prompt += f"<s>{m['role']}\n{m['content']}</s>\n"
-    prompt += "<s>assistant\n"
+    prompt += "<s>assistant\nDear [Recipient],\n\n"
     return prompt
 
 # ──────────────────────────── Helpers ──────────────────────────────────
@@ -173,9 +173,9 @@ def handle_request(request: dict) -> dict:
         try:
             structured = _structurer(
                 prompt,
-                max_new_tokens=128,
-                temperature=0.7,
-                top_p=0.9,
+                max_new_tokens=64,
+                temperature=0.4,
+                top_p=0.8,
                 repetition_penalty=1.4,
                 do_sample=True,
             )[0]["generated_text"].strip()

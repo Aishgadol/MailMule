@@ -1,6 +1,6 @@
 # #!/usr/bin/env python
 # # =============================================================================
-# # mock_email_generator.py — v13.0  (2025-06-21)
+# # [utility]mock_email_generator.py — v13.0  (2025-06-21)
 # # -----------------------------------------------------------------------------
 # # Relaxed gatekeeping so the LLM actually produces content:
 # #   • looser validation   • tiny 1-shot example in prompt
@@ -256,7 +256,7 @@
 
 # =============================================================================
 # ministal_email_generator.py — merged generation from [unused]ministal_experiment.py
-#                    with mock_email_generator.py JSON output format
+#                    with [utility]mock_email_generator.py JSON output format
 # =============================================================================
 import argparse
 import json
