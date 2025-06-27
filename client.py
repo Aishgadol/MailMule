@@ -1,7 +1,9 @@
+import os
 import random
+import time
 import tkinter as tk
 from tkinter import messagebox
-from server import handle_request  # your server script
+from server import handle_request, PREPROCESSED_JSON  # your server script
 
 PLACEHOLDER = "Tell me what type of emails you're looking for..."
 
@@ -47,6 +49,16 @@ class App:
             self.query_entry.insert(0, PLACEHOLDER)
             self.query_entry.config(fg="grey")
 
+    def _bind_mousewheel(self, widget):
+        widget.bind_all("<MouseWheel>", lambda e: widget.yview_scroll(int(-1*(e.delta/120)), "units"))
+        widget.bind_all("<Button-4>", lambda e: widget.yview_scroll(-1, "units"))
+        widget.bind_all("<Button-5>", lambda e: widget.yview_scroll(1, "units"))
+
+    def _unbind_mousewheel(self, widget):
+        widget.unbind_all("<MouseWheel>")
+        widget.unbind_all("<Button-4>")
+        widget.unbind_all("<Button-5>")
+
     def _build_login_screen(self):
         self.login_frame = tk.Frame(self.root)
 
@@ -58,10 +70,10 @@ class App:
         self.username_var = tk.StringVar()
         self.password_var = tk.StringVar()
         tk.Label(self.login_frame, text="Username:").pack(anchor="w", padx=20)
-        tk.Entry(self.login_frame, textvariable=self.username_var).pack(fill="x", padx=20)
+        tk.Entry(self.login_frame, textvariable=self.username_var).pack(fill="x", padx=20, ipady=10)
         tk.Label(self.login_frame, text="Password:").pack(anchor="w", padx=20, pady=(10,0))
         pwd_entry = tk.Entry(self.login_frame, textvariable=self.password_var, show="*")
-        pwd_entry.pack(fill="x", padx=20)
+        pwd_entry.pack(fill="x", padx=20, ipady=10)
         pwd_entry.bind("<Return>", lambda e: self.login_button.invoke())
 
         # buttons row
@@ -97,7 +109,7 @@ class App:
         self.back_btn.pack(side="left", padx=5)
 
         self.query_entry = tk.Entry(top)
-        self.query_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=5)
+        self.query_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=10)
         self.query_entry.bind("<FocusIn>", self._on_query_focus)
         self.query_entry.bind("<FocusOut>", self._on_query_focus_out)
         self._reset_query_field()
@@ -128,6 +140,8 @@ class App:
         self.attr_frame = tk.Frame(self._attr_canvas)
         self._attr_canvas.create_window((0,0), window=self.attr_frame, anchor="nw")
         self.attr_frame.bind("<Configure>", lambda e: self._attr_canvas.configure(scrollregion=self._attr_canvas.bbox("all")))
+        self._attr_canvas.bind("<Enter>", lambda e: self._bind_mousewheel(self._attr_canvas))
+        self._attr_canvas.bind("<Leave>", lambda e: self._unbind_mousewheel(self._attr_canvas))
 
         # results panel (right)
         res_container = tk.Frame(content, bd=1, relief="groove")
@@ -141,6 +155,8 @@ class App:
         self.res_frame = tk.Frame(self._res_canvas)
         self._res_canvas.create_window((0,0), window=self.res_frame, anchor="nw")
         self.res_frame.bind("<Configure>", lambda e: self._res_canvas.configure(scrollregion=self._res_canvas.bbox("all")))
+        self._res_canvas.bind("<Enter>", lambda e: self._bind_mousewheel(self._res_canvas))
+        self._res_canvas.bind("<Leave>", lambda e: self._unbind_mousewheel(self._res_canvas))
 
     def show_login_screen(self):
         print()
@@ -209,11 +225,19 @@ class App:
         # update attributes panel with mock data
         for w in self.attr_frame.winfo_children():
             w.destroy()
+        dates = [r.get("date") for r in results if r.get("date")]
+        latest = max(dates) if dates else "N/A"
+        oldest = min(dates) if dates else "N/A"
+        last_update = time.ctime(os.path.getmtime(PREPROCESSED_JSON))
+
         attrs = {
             "Total Emails": random.randint(100, 500),
             "Total Conversations": random.randint(10, 100),
             "Last Query": q,
-            "Example Attr": "Value"
+            "Number of Results": len(results),
+            "Latest Email": latest,
+            "Oldest Email": oldest,
+            "Data File Updated": last_update,
         }
         for k, v in attrs.items():
             lbl = tk.Label(self.attr_frame, text=f"{k}: {v}", anchor="w")
