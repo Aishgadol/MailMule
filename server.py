@@ -139,12 +139,15 @@ def handle_request(request: dict) -> dict:
             return {"error": "Empty query"}
 
         log.info("Structuring query with Ministral-3B…")
+        prompt = f"{SYSTEM_PROMPT}\n\n{q}"
+        log.info("LLM prompt → %s", prompt)
         try:
             structured = _structurer(
-                f"{SYSTEM_PROMPT}\n\n{q}",
+                prompt,
                 max_length=64,
                 do_sample=False
             )[0]["generated_text"].strip()
+            log.info("LLM output → %s", structured)
             log.debug("Structured query → %s", structured)
         except Exception as err:
             log.error("Query structuring error: %s", err, exc_info=True)
