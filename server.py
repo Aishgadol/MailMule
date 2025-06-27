@@ -30,7 +30,11 @@ EMBED_MODEL = "BAAI/bge-m3"                     # pgvector encoder
 BATCH_SIZE  = 64
 
 INSTRUCT_MODEL = "ministral/Ministral-3b-instruct"
-SYSTEM_PROMPT  = "What subjects is this query discussing about?"
+SYSTEM_PROMPT  = (
+    "You need to turn this text into a topic-based ready-to-embed text that will "
+    "be used for semantic lookup against a database of emails discussing various "
+    "topic. be concise, to the point, focused, short."
+)
 
 # ─────────────────────────── Logging Setup ──────────────────────────────
 log = logging.getLogger("server")
@@ -46,7 +50,7 @@ _ids     = []     # list of email IDs in index order
 
 # pre-load models once
 _embedder   = SentenceTransformer(EMBED_MODEL)
-_structurer = hf_pipeline("text2text-generation", model=INSTRUCT_MODEL)
+_structurer = hf_pipeline("text-generation", model=INSTRUCT_MODEL)
 
 # ──────────────────────────── Helpers ──────────────────────────────────
 def _build_index():
@@ -66,8 +70,18 @@ def _build_index():
         _ids   = []
         return
 
-    _ids  = [r[0] for r in rows]
-    embs  = np.vstack([r[1] for r in rows]).astype("float32")
+    _ids = [r[0] for r in rows]
+    embs_list = []
+    for r in rows:
+        emb = r[1]
+        if isinstance(emb, str):
+            try:
+                emb = json.loads(emb)
+            except json.JSONDecodeError:
+                log.error("Invalid embedding format for id %s", r[0])
+                continue
+        embs_list.append(emb)
+    embs = np.vstack(embs_list).astype("float32")
     dim   = embs.shape[1]
     idx   = faiss.IndexFlatIP(dim)
     idx.add(embs)
@@ -144,8 +158,11 @@ def handle_request(request: dict) -> dict:
         try:
             structured = _structurer(
                 prompt,
-                max_length=64,
-                do_sample=False
+                max_new_tokens=128,
+                temperature=0.7,
+                top_p=0.9,
+                repetition_penalty=1.4,
+                do_sample=True,
             )[0]["generated_text"].strip()
             log.info("LLM output → %s", structured)
             log.debug("Structured query → %s", structured)
