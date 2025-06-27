@@ -1,0 +1,12 @@
+beautifulsoup4
+python-docx
+PyPDF2
+google-auth-oauthlib
+google-api-python-client
+sentence-transformers
+transformers
+torch
+psycopg2-binary
+faiss-cpu
+numpy
+faker

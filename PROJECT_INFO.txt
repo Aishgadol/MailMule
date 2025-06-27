@@ -1,0 +1,10 @@
+PostgreSQL configuration used by the scripts:
+  host:     localhost
+  port:     5432
+  user:     mailmule
+  password: 159753
+  database: mailmule_db
+  conv_db:  mailmule_conv_db
+
+Credential files are stored under `server_client_local_files/`.
+Run the Gmail extractor first to create `emails.json` before any other step.
