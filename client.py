@@ -79,8 +79,15 @@ class App:
         tk.Button(top, text="< Back", command=self._on_back).pack(side="left", padx=5)
         self.query_entry = tk.Entry(top)
         self.query_entry.pack(side="left", fill="x", expand=True, padx=5)
-        search_btn = tk.Button(top, text="Search", command=self._on_search)
-        search_btn.pack(side="left", padx=5)
+        self.search_btn = tk.Button(
+            top,
+            text="Search",
+            command=self._on_search,
+            font=("Arial", 12),
+            width=10,
+            height=2,
+        )
+        self.search_btn.pack(side="left", padx=5)
         top.pack(fill="x", pady=10, padx=10)
 
         # content area
@@ -152,6 +159,8 @@ class App:
             self.credentials["password"] = p
             self.show_search_screen()
             self._clear_login_fields()
+        else:
+            messagebox.showerror("Error", "Please fill out both fields.")
 
     def _on_back(self):
         print()
@@ -165,6 +174,7 @@ class App:
         print(f"Search button pressed with query: {q!r}")
         if not q:
             return
+        self.search_btn.config(state="disabled")
         messagebox.showinfo("Search", "Starting the search, this might take some time.")
         try:
             resp = handle_request({"type": "inputFromUI", "query": q, "k": 5})
@@ -236,6 +246,8 @@ class App:
                     btn.pack(anchor="e", pady=(5,0))
 
                 card.pack(fill="x", padx=5, pady=5)
+
+        self.search_btn.config(state="normal")
 
     def run(self):
         self.root.mainloop()
