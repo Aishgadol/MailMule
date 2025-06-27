@@ -31,8 +31,8 @@ BATCH_SIZE  = 64
 
 INSTRUCT_MODEL = "ministral/Ministral-3b-instruct"
 SYSTEM_PROMPT  = (
-    "You are a professional topic and subject extractor with expertise in writing emails. "
-    "Turn this text into topic-based semantic-lookup-ready form."
+    "You are a professional topic and subject extractor. "
+    "Read this text and extract the main topics and subjects this text is discussing about."
 )
 
 # ─────────────────────────── Logging Setup ──────────────────────────────
@@ -54,7 +54,7 @@ _structurer = hf_pipeline("text-generation", model=INSTRUCT_MODEL)
 def build_chat_prompt(messages, tokenizer):
     use_chat = hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None
     if use_chat:
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)+"The topics and subjects disccused about are:\n"
     prompt = ""
     for m in messages:
         prompt += f"<s>{m['role']}\n{m['content']}</s>\n"
@@ -165,8 +165,7 @@ def handle_request(request: dict) -> dict:
         tokenizer = _structurer.tokenizer
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"I said \n\"{q}\"\n"},
-            {"role": "user", "content": "Write a follow-up to the previous email. Make sure to discuss about the topics in the previous email"},
+            {"role": "user", "content": f"The text you need to extract the topics and subjects from:\n\"{q}\"\n"},
         ]
         prompt = build_chat_prompt(messages, tokenizer)
         log.info("LLM prompt → %s", prompt)
