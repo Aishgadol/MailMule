@@ -17,6 +17,19 @@ class App:
         self._build_search_screen()
         self.show_login_screen()
 
+    def _clear_login_fields(self):
+        """Remove any text from the username and password entries."""
+        self.username_var.set("")
+        self.password_var.set("")
+
+    def _clear_search_screen(self):
+        """Remove query text and any search results/attributes."""
+        self.query_entry.delete(0, "end")
+        for w in self.attr_frame.winfo_children():
+            w.destroy()
+        for w in self.res_frame.winfo_children():
+            w.destroy()
+
     def _build_login_screen(self):
         self.login_frame = tk.Frame(self.root)
 
@@ -101,21 +114,27 @@ class App:
         self.res_frame.bind("<Configure>", lambda e: self._res_canvas.configure(scrollregion=self._res_canvas.bbox("all")))
 
     def show_login_screen(self):
+        print()
         print("Showing login screen")
         self.search_frame.pack_forget()
+        self._clear_login_fields()
         self.login_frame.pack(fill="both", expand=True)
 
     def show_search_screen(self):
+        print()
         print("Showing search screen")
         self.login_frame.pack_forget()
+        self._clear_search_screen()
         self.search_frame.pack(fill="both", expand=True)
 
     def _on_forgot(self):
+        print()
         print("Forgot password? button pressed")
 
     def _toggle_signup(self):
         self.signup_mode_enabled = not self.signup_mode_enabled
         mode = "Sign up" if self.signup_mode_enabled else "Login"
+        print()
         print(f"Toggling signup mode: now in {mode} mode")
         self.login_label.config(text=mode)
         self.signup_button.config(text="Back to Login" if self.signup_mode_enabled else "Sign up!")
@@ -124,6 +143,7 @@ class App:
     def _on_login(self):
         u = self.username_var.get().strip()
         p = self.password_var.get().strip()
+        print()
         print("LOGIN button pressed")
         print(f"  Username: {u!r}")
         print(f"  Password: {p!r}")
@@ -131,18 +151,17 @@ class App:
             self.credentials["username"] = u
             self.credentials["password"] = p
             self.show_search_screen()
+            self._clear_login_fields()
 
     def _on_back(self):
+        print()
         print("Back button pressed")
-        self.query_entry.delete(0, "end")
-        for w in self.attr_frame.winfo_children():
-            w.destroy()
-        for w in self.res_frame.winfo_children():
-            w.destroy()
+        self._clear_search_screen()
         self.show_login_screen()
 
     def _on_search(self):
         q = self.query_entry.get().strip()
+        print()
         print(f"Search button pressed with query: {q!r}")
         if not q:
             return
