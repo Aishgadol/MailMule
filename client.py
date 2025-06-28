@@ -52,6 +52,12 @@ class App:
             self.query_entry.delete(0, "end")
             self.query_entry.config(fg="black")
 
+    def _on_query_key(self, event=None):
+        """Ensure placeholder text is removed when user starts typing."""
+        if self.query_entry.get() == PLACEHOLDER and self.query_entry.cget("fg") == "grey":
+            self.query_entry.delete(0, "end")
+            self.query_entry.config(fg="black")
+
     def _on_query_focus_out(self, event=None):
         if not self.query_entry.get():
             self.query_entry.insert(0, PLACEHOLDER)
@@ -120,6 +126,7 @@ class App:
         self.query_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=10)
         self.query_entry.bind("<FocusIn>", self._on_query_focus)
         self.query_entry.bind("<FocusOut>", self._on_query_focus_out)
+        self.query_entry.bind("<Key>", self._on_query_key)
         self._reset_query_field()
         self.search_btn = tk.Button(
             top,
