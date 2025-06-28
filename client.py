@@ -14,6 +14,14 @@ class App:
         self.root.geometry("1200x800")
         self.root.resizable(False, False)
 
+        # ensure server dependencies are running before proceeding
+        status = handle_request({"type": "healthCheck"})
+        if not (status.get("docker_ok") and status.get("postgres_ok")):
+            msg = status.get("error", "Unknown error")
+            messagebox.showerror("Startup Error", f"Server unavailable: {msg}")
+            self.root.destroy()
+            return
+
         self.signup_mode_enabled = False
         self.credentials = {}
 

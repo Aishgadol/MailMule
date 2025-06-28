@@ -14,12 +14,18 @@ Scripts are intentionally decoupled so each stage can be run on its own or swapp
 
 ## Running the Demo
 1. Install the dependencies from `requirements.txt` in a Python 3.10 environment.
-2. Start a local PostgreSQL server and create two databases: `mailmule_db` and `mailmule_conv_db`.
+2. Ensure Docker is running and start the bundled Postgres container (for example with `docker-compose up -d db`). This creates the databases `mailmule_db` and `mailmule_conv_db`.
 3. Run `gmail_json_extractor_to_json_best.py` to export your mailbox.
 4. Execute `preprocess_emails_for_embeddings.py` followed by `storage_and_embedding.py --create` to build the initial database.
-5. Launch the GUI with `python client.py` and search through your emails.
+5. Launch the GUI with `python client.py`. The client performs a health check to confirm Docker and Postgres are reachable before showing the interface.
 
 The models are small so results might not be perfect, but the system demonstrates how to wire together data extraction, preprocessing, embedding generation and similarity search entirely offline.
+
+## Startup Health Check
+When the GUI starts it issues a `healthCheck` request to the server. The server
+in turn verifies that the Docker daemon is accessible and that PostgreSQL is
+accepting connections. If either dependency is unavailable the GUI exits with an
+informative error message instead of failing later during a search.
 
 ## Tech Stack
 - Python 3.10
