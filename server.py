@@ -2,6 +2,7 @@
 import os
 import json
 import logging
+import subprocess
 
 import psycopg2
 import numpy as np
@@ -50,6 +51,28 @@ _ids     = []     # list of email IDs in index order
 # pre-load models once
 _embedder   = SentenceTransformer(EMBED_MODEL)
 _structurer = hf_pipeline("text-generation", model=INSTRUCT_MODEL)
+
+def check_docker_postgres() -> dict:
+    """Check whether Docker is running and PostgreSQL is reachable."""
+    # verify Docker daemon is accessible
+    try:
+        subprocess.run([
+            "docker",
+            "info"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        docker_ok = True
+    except Exception as err:
+        log.error("Docker check failed: %s", err)
+        return {"docker_ok": False, "postgres_ok": False, "error": "Docker not running"}
+
+    # verify Postgres connection
+    try:
+        conn = psycopg2.connect(**EMAIL_DB_CFG)
+        conn.close()
+        return {"docker_ok": docker_ok, "postgres_ok": True}
+    except Exception as err:
+        log.error("Postgres connection failed: %s", err)
+        return {"docker_ok": docker_ok, "postgres_ok": False, "error": str(err)}
 
 def build_chat_prompt(messages, tokenizer):
     use_chat = hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None
@@ -106,9 +129,14 @@ def handle_request(request: dict) -> dict:
     request["type"] can be:
       • "sendEmailsToUI" → returns all conversations (no embeddings)
       • "inputFromUI"    → expects "query": str, optional "k": int
+      • "healthCheck"   → verifies Docker and Postgres availability
     """
     req_type = request.get("type")
     log.debug("handle_request called with: %s", request)
+
+    # quick health check before doing any heavy work
+    if req_type == "healthCheck":
+        return check_docker_postgres()
 
     # 1) Ingest / upsert any new preprocessed emails & rebuild index if needed
     try:
