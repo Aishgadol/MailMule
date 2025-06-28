@@ -53,17 +53,23 @@ _embedder   = SentenceTransformer(EMBED_MODEL)
 _structurer = hf_pipeline("text-generation", model=INSTRUCT_MODEL)
 
 def check_docker_postgres() -> dict:
-    """Check whether Docker is running and PostgreSQL is reachable."""
+    """Return status of Docker and PostgreSQL availability."""
     # verify Docker daemon is accessible
+    docker_ok = False
     try:
-        subprocess.run([
-            "docker",
-            "info"
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(
+            ["docker", "info"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
         docker_ok = True
-    except Exception as err:
+    except FileNotFoundError:
+        log.error("docker executable not found")
+        return {"docker_ok": False, "postgres_ok": False, "error": "docker not installed"}
+    except subprocess.CalledProcessError as err:
         log.error("Docker check failed: %s", err)
-        return {"docker_ok": False, "postgres_ok": False, "error": "Docker not running"}
+        return {"docker_ok": False, "postgres_ok": False, "error": "docker not running"}
 
     # verify Postgres connection
     try:
