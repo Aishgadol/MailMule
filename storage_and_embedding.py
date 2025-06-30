@@ -372,7 +372,7 @@ def create_or_update(
 if __name__ == "__main__":
     import argparse
 
-    JSON_PATH = Path("server_client_local_files/big_mock.json")
+    JSON_PATH = Path("server_client_local_files/mock_preprocessed_emails.json")
     EMAIL_DB_CFG = dict(
         host=os.getenv("PGHOST", "localhost"),
         port=os.getenv("PGPORT", "5432"),

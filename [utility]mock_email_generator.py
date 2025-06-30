@@ -294,9 +294,18 @@ FOLLOWUP_REPETITION_PENALTY = 1.4
 FOLLOWUP_MAX_NEW_TOKENS_MIN = 170
 FOLLOWUP_MAX_NEW_TOKENS_MAX = 215
 TOPICS = [
-    "Motorsports Results", "Food & Dining", "Job Applications",
-    "Medical Appointments", "Gaming Sessions", "Stock Market"
+    "Photography & Art. Keywords: { photography, photo, art, capture, create, frame, shoot, print, exhibit, display }",
+    "Lifestyle & Fashion. Keywords: { fashion, style, wear, dress, shop, model, brand, accessorize, design, trend }",
+    "Food & Cooking. Keywords: { food, cook, eat, bake, meal, taste, serve, grill, plate, season }",
+    "Travel & Adventure. Keywords: { travel, explore, visit, hike, tour, journey, camp, climb, discover, wander }",
+    "Health & Fitness. Keywords: { fitness, train, run, walk, lift, stretch, sweat, heal, recover, move }",
+    "Music & Entertainment. Keywords: { music, play, listen, stream, sing, dance, film, watch, perform, act }",
+    "Business & Entrepreneurship. Keywords: { business, start, lead, manage, invest, market, grow, hire, sell, launch }",
+    "Tech & Innovation. Keywords: { tech, build, code, test, design, connect, automate, innovate, review, launch }",
+    "Pets & Animals. Keywords: { pet, dog, cat, feed, walk, care, train, play, adopt, rescue }",
+    "Home & Interior Design. Keywords: { home, renovate, decorate, furnish, organize, build, style, arrange, improve, design }"
 ]
+
 
 faker = Faker()
 
@@ -381,7 +390,7 @@ def generate_followup_email(topic: str, prev_reply: str) -> str:
         {"role": "user", "content": f"I said:\n\"{prev_reply}\""},
         {"role": "user", "content": f"Write a follow-up to the previous email. Make sure to discuss about {topic}."}
     ]
-    prompt = build_chat_prompt(messages, tokenizer)
+    prompt = build_chat_prompt(messages, tokenizer)+"\nDear [Recipient],\n\n"
     print(f"Prompt for follow-up:\n{prompt}\n")
     pipe = pipeline(
         "text-generation", model=model, tokenizer=tokenizer,
@@ -484,7 +493,7 @@ def main(argv=None):
                     help="device for model (e.g., cpu or cuda:0) (overrides default)")
     ap.add_argument("--seed", type=int,
                     help="random seed for reproducibility")
-    ap.add_argument("--max-emails", type=int, default=10,
+    ap.add_argument("--max-emails", type=int, default=1500,
                     help="total emails to generate across all threads")
     args = ap.parse_args(argv)
     print(f"Parsed arguments: {args}\n")
