@@ -15,17 +15,17 @@ from transformers import pipeline as hf_pipeline
 from storage_and_embedding import create_or_update
 
 # ─────────────────────────── Configuration ──────────────────────────────
-# (hard-coded for now; later you can move to env or a cfg file)
+# Database connection details can be overridden with PG* environment variables
 PREPROCESSED_JSON = "./server_client_local_files/big_mock.json"
 
-EMAIL_DB_CFG = {
-    "host":     "localhost",
-    "port":     "5432",
-    "user":     "mailmule",
-    "password": "159753",
-    "dbname":   "mailmule_db",
-}
-CONV_DB_CFG = {**EMAIL_DB_CFG, "dbname": "mailmule_conv_db"}
+EMAIL_DB_CFG = dict(
+    host=os.getenv("PGHOST", "localhost"),
+    port=os.getenv("PGPORT", "5432"),
+    user=os.getenv("PGUSER", "mailmule"),
+    password=os.getenv("PGPASSWORD", "159753"),
+    dbname=os.getenv("PGDATABASE", "mailmule_db"),
+)
+CONV_DB_CFG = dict(EMAIL_DB_CFG, dbname=os.getenv("PGCONV_DB", "mailmule_conv_db"))
 
 EMBED_MODEL = "BAAI/bge-m3"                     # pgvector encoder
 BATCH_SIZE  = 64
