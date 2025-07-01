@@ -16,6 +16,9 @@ Each step is independent so you can inspect or modify any stage. Data moves betw
 ### Setup
 1. Install Python 3.10 and run `pip install -r requirements.txt`.
 2. Start PostgreSQL (e.g. `docker-compose up -d db`). Two databases are required: `mailmule_db` and `mailmule_conv_db`.
+   The scripts read database credentials from the standard `PG*` environment
+   variables. If your PostgreSQL instance uses different values, set `PGHOST`,
+   `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` and `PGCONV_DB` accordingly.
 3. Obtain Gmail OAuth credentials and place `credentials.json` in the repository root.
 
 ### Building the database
