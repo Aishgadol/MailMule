@@ -20,6 +20,42 @@ MailMule is organised as a set of standalone scripts that together implement a l
 - **client.py** – Tkinter GUI that calls `handle_request` directly and displays results.
 - **email_json_database_updater.py** – optional updater that fetches only new Gmail messages and re-runs preprocessing.
 
+## Pipeline Diagram
+```
+            +-------------+
+            |  Gmail API  |
+            +-------------+
+                    |
+                    v
+  +---------------------------------------+
+  | gmail_json_extractor_to_json_best.py  |
+  +---------------------------------------+
+                    |
+                    v
+  server_client_local_files/emails.json
+                    |
+                    v
+ +-----------------------------------------+
+ | preprocess_emails_for_embeddings.py     |
+ +-----------------------------------------+
+                    |
+                    v
+  server_client_local_files/preprocessed_emails.json
+                    |
+                    v
+    +---------------------------+
+    | storage_and_embedding.py  |
+    +---------------------------+
+                    |
+                    v
+     PostgreSQL (pgvector)
+                    |
+                    v
+    +-----------+      +---------+
+    | server.py |<---->| client.py |
+    +-----------+      +---------+
+```
+
 ## Data Flow
 1. `gmail_json_extractor_to_json_best.py` pulls messages from Gmail and produces `emails.json`.
 2. `preprocess_emails_for_embeddings.py` converts this to `preprocessed_emails.json`.
@@ -35,5 +71,22 @@ When the user submits a query from the GUI:
 1. `client.py` calls `handle_request({'type': 'inputFromUI', 'query': q, 'k': 8})`.
 2. The server rewrites the query with the LLM, embeds it using the same SentenceTransformer model and performs a FAISS similarity search.
 3. Metadata for the top results is fetched from Postgres and returned to the client for display.
+
+```
+client.py
+    |
+    | query
+    v
+server.py
+    |-- check Docker & Postgres
+    |-- ingest new JSON via storage_and_embedding.py
+    |-- build/update FAISS index
+    |-- rewrite query with Ministral-3b
+    |-- embed with BGE-m3
+    |-- search FAISS
+    |-- fetch metadata from PostgreSQL
+    v
+client.py (results)
+```
 
 This design keeps all data on the user's machine while providing semantic search over the local email archive.
