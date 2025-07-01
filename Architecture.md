@@ -1,46 +1,39 @@
 # Architecture
 
-MailMule is a collection of small Python utilities that together provide a local email search engine. The project avoids any cloud services after the initial Gmail download and keeps every component lightweight so it can run on a modest machine.
+MailMule is organised as a set of standalone scripts that together implement a local email search engine. After the initial Gmail export every step operates offline using local files and PostgreSQL.
 
-## Pipeline Overview
-1. **gmail_json_extractor_to_json_best.py** – performs Gmail OAuth and writes conversations to `server_client_local_files/emails.json`.
-2. **preprocess_emails_for_embeddings.py** – strips HTML and normalises text into `preprocessed_emails.json`.
-3. **storage_and_embedding.py** – encodes messages with the `BAAI/bge-m3` SentenceTransformer and stores both emails and conversation vectors in PostgreSQL (using `pgvector`).
-4. **server.py** – builds a FAISS index from the database and answers search requests. Queries are first rewritten with `ministral/Ministral-3b-instruct` via Hugging Face `pipeline` before being embedded.
-5. **client.py** – a Tkinter GUI that interacts with `server.py` through its `handle_request` function.
-6. **email_json_database_updater.py** – incremental fetcher that merges new Gmail messages into the JSON database and re-runs preprocessing.
+## Components
+- **gmail_json_extractor_to_json_best.py** – authenticates with Gmail and writes conversations to `server_client_local_files/emails.json`.
+  - Uses the Gmail API and `BeautifulSoup` to extract plain text from messages and attachments.
+- **preprocess_emails_for_embeddings.py** – cleans HTML, normalises whitespace and writes `preprocessed_emails.json`.
+- **storage_and_embedding.py** – embeds messages and stores them in Postgres.
+  - Functions `create_all`, `update_all` and `create_or_update` manage ingestion.
+  - Email embeddings are generated with `SentenceTransformer` (`BAAI/bge-m3`).
+  - Two tables are created:
+    - `emails` (id, conversation_id, subject, sender, date, order_in_conv, content, raw, embedding)
+    - `conversations` (conversation_id, email_count, embedding)
+- **server.py** – interface used by the GUI.
+  - Keeps a FAISS `IndexFlatIP` in memory.
+  - Provides `handle_request()` which supports `sendEmailsToUI`, `inputFromUI` and `healthCheck` requests.
+  - On startup or when new data arrives it rebuilds the FAISS index from the embeddings stored in Postgres.
+  - Queries are rephrased with the `transformers` text-generation pipeline (`ministral/Ministral-3b-instruct`) before embedding.
+- **client.py** – Tkinter GUI that calls `handle_request` directly and displays results.
+- **email_json_database_updater.py** – optional updater that fetches only new Gmail messages and re-runs preprocessing.
 
-Below is a simplified diagram of how the components connect:
+## Data Flow
+1. `gmail_json_extractor_to_json_best.py` pulls messages from Gmail and produces `emails.json`.
+2. `preprocess_emails_for_embeddings.py` converts this to `preprocessed_emails.json`.
+3. `storage_and_embedding.py` embeds the cleaned emails and populates the `emails` and `conversations` tables.
+4. `server.py` loads all embeddings into FAISS and exposes `handle_request`.
+5. `client.py` sends search queries to the server and renders the results.
+6. `email_json_database_updater.py` can append new messages to `emails.json` so steps 2–4 can be repeated.
 
-```
-Gmail API
-   |
-[gmail_json_extractor_to_json_best.py]
-   |
-emails.json
-   |
-[preprocess_emails_for_embeddings.py]
-   |
-preprocessed_emails.json
-   |
-[storage_and_embedding.py] --(BAAI/bge-m3)--> PostgreSQL + pgvector
-   |
-        +--------------+
-        |  server.py   |
-        +--------------+
-          ^       |
-          |       | rephrase (Ministral-3b) -> embed -> FAISS
-        +--------------+
-        |  client.py   |
-        +--------------+
-```
+The scripts communicate through JSON files and the local PostgreSQL instance. Models are loaded once per run to minimise memory usage and startup cost.
 
-The optional `email_json_database_updater.py` feeds new data back into `emails.json` so preprocessing can be rerun when new messages arrive.
+## Search Process
+When the user submits a query from the GUI:
+1. `client.py` calls `handle_request({'type': 'inputFromUI', 'query': q, 'k': 8})`.
+2. The server rewrites the query with the LLM, embeds it using the same SentenceTransformer model and performs a FAISS similarity search.
+3. Metadata for the top results is fetched from Postgres and returned to the client for display.
 
-The scripts communicate via simple JSON files and a local PostgreSQL instance. Models are loaded once per run and kept in memory to minimise latency.
-
-## Models
-- **BAAI/bge-m3** (SentenceTransformer) for email embeddings.
-- **ministral/Ministral-3b-instruct** via `transformers.pipeline` to structure user queries.
-
-FAISS is used for similarity search while PostgreSQL + pgvector store metadata and vectors.
+This design keeps all data on the user's machine while providing semantic search over the local email archive.
